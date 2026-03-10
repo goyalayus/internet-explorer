@@ -8,6 +8,7 @@ from typing import Any
 from internet_explorer.config import AppConfig
 from internet_explorer.models import BrowserDelegateResult, BrowserStep
 from internet_explorer.repo_bridge import load_eu_swarm_modules
+from internet_explorer.site_graph import SiteGraph
 from internet_explorer.telemetry import Telemetry
 
 VALID_OUTCOMES = {
@@ -77,13 +78,13 @@ class BrowserDelegationManager:
             self._active = max(0, self._active - 1)
             return self._active
 
-    async def delegate(self, *, url: str, intent: str, url_id: str) -> BrowserDelegateResult:
+    async def delegate(self, *, url: str, intent: str, url_id: str, site_graph: SiteGraph | None = None) -> BrowserDelegateResult:
         if self._semaphore is not None:
             async with self._semaphore:
-                return await self._delegate_unbounded(url=url, intent=intent, url_id=url_id)
-        return await self._delegate_unbounded(url=url, intent=intent, url_id=url_id)
+                return await self._delegate_unbounded(url=url, intent=intent, url_id=url_id, site_graph=site_graph)
+        return await self._delegate_unbounded(url=url, intent=intent, url_id=url_id, site_graph=site_graph)
 
-    async def _delegate_unbounded(self, *, url: str, intent: str, url_id: str) -> BrowserDelegateResult:
+    async def _delegate_unbounded(self, *, url: str, intent: str, url_id: str, site_graph: SiteGraph | None) -> BrowserDelegateResult:
         session_name = f"ie_{url_id}_{uuid.uuid4().hex[:8]}"
         active = self._inc()
         self.telemetry.emit(
@@ -95,7 +96,7 @@ class BrowserDelegationManager:
             decision="delegate_start",
         )
         try:
-            result = await asyncio.to_thread(self._run_delegate_sync, session_name, url, intent, url_id)
+            result = await asyncio.to_thread(self._run_delegate_sync, session_name, url, intent, url_id, site_graph)
             self.telemetry.emit(
                 phase="browser_delegate",
                 actor="browser_agent",
@@ -125,11 +126,12 @@ class BrowserDelegationManager:
                 decision="delegate_end",
             )
 
-    def _run_delegate_sync(self, session_name: str, url: str, intent: str, url_id: str) -> BrowserDelegateResult:
+    def _run_delegate_sync(self, session_name: str, url: str, intent: str, url_id: str, site_graph: SiteGraph | None) -> BrowserDelegateResult:
         AzureOpenAIProvider = self.modules["AzureOpenAIProvider"]
         create_agent = self.modules["create_agent"]
         Task = self.modules["Task"]
         close_session = self.modules["close_session"]
+        ToolFunction = self.modules["ToolFunction"]
 
         provider = AzureOpenAIProvider(
             model=self.config.azure_openai_model,
@@ -139,12 +141,17 @@ class BrowserDelegationManager:
             temperature=0.0,
         )
         workspace = self.config.eu_swarm_path / "smart_scraping_path_identifier"
+        extra_tools = site_graph.build_browser_tools(ToolFunction) if site_graph is not None else None
         agent = create_agent(
             provider=provider,
             workspace=workspace,
             debug_mode=False,
             max_iterations=18,
+            extra_tools=extra_tools,
         )
+        if extra_tools:
+            existing = {tool.name for tool in agent.tools}
+            agent.tools.extend(tool for tool in extra_tools if tool.name not in existing)
         self._wrap_tools(agent, session_name)
         task = Task(
             description=(
@@ -160,6 +167,9 @@ class BrowserDelegationManager:
                 "- If captcha or phone OTP appears, stop and report it.\n"
                 "- If payment/paywall appears during signup or access, classify as paywall.\n"
                 "- Do not buy anything.\n"
+                "- Use sg_read_tree or sg_get_frontier when helpful to understand the current site structure.\n"
+                "- When you inspect an important page, use sg_record_page with a concise summary instead of relying on long history.\n"
+                "- If you discover important internal pages, use sg_add_links so the shared site graph stays current.\n"
             ),
             expected_output="JSON with task_result, recipe, evidence, assumptions, confidence",
             output_schema={

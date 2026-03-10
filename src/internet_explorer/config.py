@@ -61,6 +61,11 @@ class AppConfig(BaseModel):
     results_per_serp_page: int = 10
     max_internal_links: int = 12
     max_link_depth: int = 1
+    max_site_graph_visits: int = 6
+    max_site_graph_nodes: int = 80
+    max_site_graph_frontier: int = 8
+    max_sitemap_urls: int = 150
+    max_sitemap_fetches: int = 6
     request_timeout_seconds: int = 20
     llm_max_retries: int = 2
     tool_flow_env_path: Path
@@ -153,6 +158,11 @@ class AppConfig(BaseModel):
             results_per_serp_page=int(os.getenv("RESULTS_PER_SERP_PAGE", "10")),
             max_internal_links=int(os.getenv("MAX_INTERNAL_LINKS", "12")),
             max_link_depth=int(os.getenv("MAX_LINK_DEPTH", "1")),
+            max_site_graph_visits=int(os.getenv("MAX_SITE_GRAPH_VISITS", "6")),
+            max_site_graph_nodes=int(os.getenv("MAX_SITE_GRAPH_NODES", "80")),
+            max_site_graph_frontier=int(os.getenv("MAX_SITE_GRAPH_FRONTIER", "8")),
+            max_sitemap_urls=int(os.getenv("MAX_SITEMAP_URLS", "150")),
+            max_sitemap_fetches=int(os.getenv("MAX_SITEMAP_FETCHES", "6")),
             request_timeout_seconds=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20")),
             llm_max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")),
             tool_flow_env_path=tool_flow_env_path,

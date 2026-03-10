@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 
 
 OutcomeType = Literal[
@@ -16,6 +16,7 @@ OutcomeType = Literal[
 ]
 
 RenderProfile = Literal["static_ssr", "hybrid", "csr_shell"]
+SiteNodeStatus = Literal["unvisited", "fetched", "analyzed", "delegated_browser", "failed"]
 
 
 class Strategy(BaseModel):
@@ -60,6 +61,7 @@ class FetchResult(BaseModel):
     status_code: int | None = None
     content_type: str = ""
     html: str = ""
+    body_text: str = ""
     text_excerpt: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
 
@@ -131,6 +133,36 @@ class BrowserDelegateResult(BaseModel):
     raw_output: dict[str, Any] = Field(default_factory=dict)
 
 
+class SiteGraphNode(BaseModel):
+    canonical_url: str
+    title: str = ""
+    page_type_guess: str = ""
+    discovered_via: list[str] = Field(default_factory=list)
+    status: SiteNodeStatus = "unvisited"
+    summary: str = ""
+    signals: list[str] = Field(default_factory=list)
+    depth: int = 0
+    priority_score: float = 0.0
+    last_render_profile: str = "unknown"
+    last_visited_at: datetime | None = None
+
+
+class SiteGraphEdge(BaseModel):
+    from_url: str
+    to_url: str
+    discovered_via: str
+
+
+class SiteGraphSnapshot(BaseModel):
+    site_id: str
+    root_url: str
+    domain: str
+    bootstrap_sources: list[str] = Field(default_factory=list)
+    nodes: list[SiteGraphNode] = Field(default_factory=list)
+    edges: list[SiteGraphEdge] = Field(default_factory=list)
+    frontier: list[str] = Field(default_factory=list)
+
+
 class UrlEvaluation(BaseModel):
     url_id: str
     canonical_url: str
@@ -152,6 +184,7 @@ class UrlEvaluation(BaseModel):
     auth_required: bool = False
     captcha_present: bool = False
     evidence: list[PageEvidence] = Field(default_factory=list)
+    site_graph: SiteGraphSnapshot | None = None
     browser_result: BrowserDelegateResult | None = None
     notes: list[str] = Field(default_factory=list)
 

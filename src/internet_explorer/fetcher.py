@@ -70,14 +70,16 @@ class AsyncWebFetcher:
     async def fetch(self, url: str) -> FetchResult:
         response = await self.client.get(url)
         content_type = response.headers.get("content-type", "")
+        body_text = response.text
         html = response.text if "html" in content_type or not content_type else ""
-        text = _html_to_text(html)[:4000] if html else response.text[:4000]
+        text = _html_to_text(html)[:4000] if html else body_text[:4000]
         return FetchResult(
             url=url,
             final_url=str(response.url),
             status_code=response.status_code,
             content_type=content_type,
             html=html,
+            body_text=body_text,
             text_excerpt=text,
             headers=dict(response.headers),
         )
@@ -178,4 +180,3 @@ def _html_to_text(html: str) -> str:
     for node in soup(["script", "style", "noscript"]):
         node.extract()
     return " ".join(soup.get_text(" ", strip=True).split())
-
