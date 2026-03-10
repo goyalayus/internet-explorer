@@ -1,0 +1,19 @@
+# Seed baseline for sources already represented in tool-flow.
+# One domain per line. This file is intentionally easy to extend.
+apollo.io
+builtwith.com
+coresignal.com
+exa.ai
+facebook.com
+googleapis.com
+intellizence.com
+linkedin.com
+peopledatalabs.com
+reddit.com
+searchapi.io
+sec.gov
+semrush.com
+theirstack.com
+threads.net
+twitter.com
+x.com

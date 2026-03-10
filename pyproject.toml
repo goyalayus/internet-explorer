@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "internet-explorer"
+version = "0.1.0"
+description = "Intent-driven datasource discovery with SSR triage and eu-swarm browser delegation."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "httpx>=0.28",
+    "openai>=2.16.0",
+    "pydantic>=2.11",
+    "pymongo>=4.14",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.8",
+]
+
+[project.scripts]
+internet-explorer = "internet_explorer.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/internet_explorer"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
