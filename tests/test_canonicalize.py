@@ -1,4 +1,4 @@
-from internet_explorer.canonicalize import canonical_domain, canonicalize_url, load_baseline_domains, registrable_domain
+from internet_explorer.canonicalize import canonical_domain, canonicalize_url, registrable_domain
 
 
 def test_canonicalize_url_removes_tracking_params() -> None:

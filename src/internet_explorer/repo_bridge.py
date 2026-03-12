@@ -38,13 +38,30 @@ def load_eu_swarm_modules(config: AppConfig) -> dict[str, object]:
     os.environ["AZURE_OPENAI_ENDPOINT"] = config.azure_openai_endpoint
     os.environ["AZURE_OPENAI_API_VERSION"] = config.azure_openai_api_version
     os.environ["AZURE_OPENAI_DEPLOYMENT"] = config.azure_openai_model
-    with _prepend_sys_path([config.eu_swarm_path, config.eu_swarm_path / "src"]):
+    browser_use_site_packages = _resolve_browser_use_site_packages(config.eu_swarm_path)
+    paths = [config.eu_swarm_path, config.eu_swarm_path / "src"]
+    if browser_use_site_packages is not None:
+        paths.append(browser_use_site_packages)
+    with _prepend_sys_path(paths):
         return {
-            "Agent": importlib.import_module("swarm.core.agent").Agent,
-            "Task": importlib.import_module("swarm.core.task").Task,
-            "ToolFunction": importlib.import_module("swarm.core.tool").ToolFunction,
             "AzureOpenAIProvider": importlib.import_module("swarm.providers.azure_openai").AzureOpenAIProvider,
             "create_agent": importlib.import_module("smart_scraping_path_identifier.agent").create_smart_scraping_path_identifier_agent,
-            "close_session": importlib.import_module("smart_scraping_path_identifier.tools.browseruse_session").close_session,
+            "SmartScraperPlan": importlib.import_module("smart_scraping_path_identifier.agent").SmartScraperPlan,
+            "BrowserUseAgent": importlib.import_module("browser_use").Agent,
+            "BrowserUseBrowser": importlib.import_module("browser_use").Browser,
+            "get_browser_use_llm_by_name": importlib.import_module("browser_use.llm.models").get_llm_by_name,
         }
 
+
+def _resolve_browser_use_site_packages(eu_swarm_path: Path) -> Path | None:
+    venv_candidates = [
+        eu_swarm_path / ".venv" / "lib",
+        eu_swarm_path / ".venv311" / "lib",
+    ]
+    for lib_dir in venv_candidates:
+        if not lib_dir.exists():
+            continue
+        for site_packages in sorted(lib_dir.glob("python*/site-packages")):
+            if (site_packages / "browser_use").exists():
+                return site_packages
+    return None

@@ -14,10 +14,10 @@ It reuses adjacent repos instead of copying code:
 3. Fetch two SERP pages per query.
 4. Canonicalize and deduplicate URLs.
 5. Check novelty against a baseline domain file.
-6. Build a shared site graph from `sitemap.xml`, `robots.txt`, `llms.txt`, and discovered internal links.
-7. Traverse the highest-priority unvisited pages instead of blindly following homepage links.
-8. Store compact page summaries and signals on site-graph nodes so both agents share state.
-9. Delegate dynamic sites to the `eu-swarm` browser agent, which can also read and update the shared site graph.
+6. Build an initial link seed once from `sitemap.xml`, `robots.txt`, and `llms.txt`.
+7. Pass that initial link list to browser delegation at start; do not maintain a mutable site map in-memory.
+8. Use `eu-swarm` only for structured browser plan output.
+9. Execute browser exploration with native `browser-use`, which can navigate to new URLs mid-run.
 10. Decide whether the source is useful and store the result in Mongo.
 11. Log every phase into append-only events.
 
@@ -53,9 +53,7 @@ Important behavior:
 - If Azure OpenAI env vars are empty, config also falls back to `../tool-flow/.env`.
 - `MAX_BROWSER_CONCURRENCY=0` means unlimited.
 - `MAX_URL_CONCURRENCY=0` means unlimited.
-- `MAX_SITE_GRAPH_VISITS` controls how many pages the normal evaluator can analyze per site.
-- `MAX_SITE_GRAPH_NODES` caps stored site-graph size per candidate.
-- `MAX_SITE_GRAPH_FRONTIER` controls how many high-priority unvisited nodes are exposed at once.
+- `MAX_SITE_GRAPH_FRONTIER` controls how many initial seeded links are passed into browser delegation.
 - The generic VPN starter reuses `../query_optimizer_repo/client-config-staging.ovpn`.
 - If `VPN_DOCDB_HOST` is empty, the loader infers the DocDB host default from the discovered `../tool-flow/scripts/vpn_and_run_*.sh` scripts.
 

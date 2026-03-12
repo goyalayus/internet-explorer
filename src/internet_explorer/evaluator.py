@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from internet_explorer.api_probe import ApiProbeService
 from internet_explorer.browser_delegate import BrowserDelegationManager
+from internet_explorer.canonicalize import registrable_domain
 from internet_explorer.config import AppConfig
 from internet_explorer.fetcher import AsyncWebFetcher, analyze_page, detect_render_profile
 from internet_explorer.llm import LLMClient
@@ -61,104 +62,91 @@ class UrlEvaluator:
             browser_result = None
             render_profile = "hybrid"
 
-            site_graph = SiteGraph(
-                config=self.config,
-                telemetry=self.telemetry,
+            initial_links = await self._collect_initial_links(candidate=candidate, intent=intent)
+
+            fetched = await self.fetcher.fetch(candidate.canonical_url)
+            self.telemetry.emit(
+                phase="page_fetch",
+                actor="system",
+                strategy_id=candidate.strategy_id,
+                query_id=candidate.query_id,
                 url_id=candidate.url_id,
-                intent=intent,
-                seed_url=candidate.canonical_url,
-                domain=candidate.domain,
+                input_payload={"url": candidate.canonical_url, "visit_index": 1},
+                output_summary={"status_code": fetched.status_code, "final_url": fetched.final_url},
+                decision="seed_page_fetched",
             )
-            await site_graph.bootstrap(self.fetcher)
 
-            for visit_index in range(self.config.max_site_graph_visits):
-                frontier = site_graph.next_frontier(limit=1)
-                if not frontier:
-                    break
-                target = frontier[0]
-                try:
-                    fetched = await self.fetcher.fetch(target.canonical_url)
-                except Exception as exc:
-                    site_graph.update_node_from_tool(
-                        url=target.canonical_url,
-                        title=target.title,
-                        page_type_guess=target.page_type_guess,
-                        summary=f"Fetch failed: {type(exc).__name__}: {exc}",
-                        signals=["fetch_failed"],
-                        status="failed",
-                        relevant_links=[],
-                    )
-                    self.telemetry.emit(
-                        phase="page_fetch",
-                        actor="system",
-                        strategy_id=candidate.strategy_id,
-                        query_id=candidate.query_id,
-                        url_id=candidate.url_id,
-                        input_payload={"url": target.canonical_url, "visit_index": visit_index + 1},
-                        output_summary={"error": str(exc)},
-                        decision="frontier_page_failed",
-                        error_code=type(exc).__name__,
-                    )
-                    continue
-                self.telemetry.emit(
-                    phase="page_fetch",
-                    actor="system",
-                    strategy_id=candidate.strategy_id,
-                    query_id=candidate.query_id,
-                    url_id=candidate.url_id,
-                    input_payload={"url": target.canonical_url, "visit_index": visit_index + 1},
-                    output_summary={"status_code": fetched.status_code, "final_url": fetched.final_url},
-                    decision="frontier_page_fetched",
-                )
+            render_profile = detect_render_profile(fetched.html)
+            self.telemetry.emit(
+                phase="render_detect",
+                actor="normal_agent",
+                url_id=candidate.url_id,
+                input_payload={"url": fetched.final_url},
+                output_summary={"render_profile": render_profile},
+                decision=render_profile,
+            )
 
-                current_render_profile = detect_render_profile(fetched.html)
-                if visit_index == 0:
-                    render_profile = current_render_profile
-                    self.telemetry.emit(
-                        phase="render_detect",
-                        actor="normal_agent",
-                        url_id=candidate.url_id,
-                        input_payload={"url": fetched.final_url},
-                        output_summary={"render_profile": render_profile},
-                        decision=render_profile,
-                    )
+            seed_evidence = analyze_page(fetched)
+            page_evidence.append(seed_evidence)
+            initial_links = _unique_links(initial_links + seed_evidence.relevant_links)
 
-                evidence = analyze_page(fetched)
-                page_evidence.append(evidence)
-                site_graph.record_analysis(
+            if render_profile == "csr_shell":
+                browser_result = await self.browser_manager.delegate(
                     url=fetched.final_url,
-                    render_profile=current_render_profile,
-                    evidence=evidence,
+                    intent=intent,
+                    url_id=candidate.url_id,
+                    initial_links=initial_links,
                 )
-                site_graph.add_links(fetched.final_url, evidence.relevant_links, discovered_via="html_link")
+            else:
+                follow_limit = max(0, min(self.config.max_internal_links, self.config.max_site_graph_visits - 1))
+                followed = 0
+                for link in initial_links:
+                    if followed >= follow_limit:
+                        break
+                    if not link or registrable_domain(link) != candidate.domain:
+                        continue
+                    if link == candidate.canonical_url:
+                        continue
+                    followed += 1
+                    try:
+                        linked_fetch = await self.fetcher.fetch(link)
+                    except Exception as exc:
+                        self.telemetry.emit(
+                            phase="link_follow",
+                            actor="system",
+                            strategy_id=candidate.strategy_id,
+                            query_id=candidate.query_id,
+                            url_id=candidate.url_id,
+                            input_payload={"url": link, "visit_index": followed + 1},
+                            output_summary={"error": str(exc)},
+                            decision="initial_link_failed",
+                            error_code=type(exc).__name__,
+                        )
+                        continue
 
-                if target.canonical_url != candidate.canonical_url:
                     self.telemetry.emit(
                         phase="link_follow",
                         actor="normal_agent",
+                        strategy_id=candidate.strategy_id,
+                        query_id=candidate.query_id,
                         url_id=candidate.url_id,
-                        input_payload={"url": target.canonical_url, "visit_index": visit_index + 1},
-                        output_summary={"status_code": fetched.status_code, "final_url": fetched.final_url},
-                        decision="frontier_followed",
+                        input_payload={"url": link, "visit_index": followed + 1},
+                        output_summary={"status_code": linked_fetch.status_code, "final_url": linked_fetch.final_url},
+                        decision="initial_link_fetched",
                     )
+                    linked_evidence = analyze_page(linked_fetch)
+                    page_evidence.append(linked_evidence)
 
-                if browser_result is None and current_render_profile == "csr_shell":
-                    browser_result = await self.browser_manager.delegate(
-                        url=fetched.final_url,
-                        intent=intent,
-                        url_id=candidate.url_id,
-                        site_graph=site_graph,
-                    )
-                    site_graph.record_browser_result(url=fetched.final_url, result=browser_result)
-
-                if evidence.captcha_present or evidence.paywall_present:
-                    break
-                if browser_result and (
-                    browser_result.classification != "unknown"
-                    or browser_result.captcha_present
-                    or browser_result.paywall_present
-                ):
-                    break
+                    linked_render = detect_render_profile(linked_fetch.html)
+                    if browser_result is None and linked_render == "csr_shell":
+                        browser_result = await self.browser_manager.delegate(
+                            url=linked_fetch.final_url,
+                            intent=intent,
+                            url_id=candidate.url_id,
+                            initial_links=initial_links,
+                        )
+                    if linked_evidence.captcha_present or linked_evidence.paywall_present:
+                        break
 
             merged_signal = self._merge_api_signal(page_evidence, browser_result)
             api_probe = None
@@ -184,7 +172,8 @@ class UrlEvaluator:
                     intent=intent,
                     candidate=candidate,
                     render_profile=render_profile,
-                    site_graph=site_graph,
+                    initial_links=initial_links,
+                    page_evidence=page_evidence,
                     browser_result=browser_result,
                     api_probe=api_probe,
                 )
@@ -221,7 +210,7 @@ class UrlEvaluator:
                 auth_required=any(item.auth_required for item in page_evidence) or bool(browser_result and browser_result.auth_required),
                 captcha_present=any(item.captcha_present for item in page_evidence) or bool(browser_result and browser_result.captcha_present),
                 evidence=page_evidence,
-                site_graph=site_graph.snapshot(),
+                site_graph=None,
                 browser_result=browser_result,
                 notes=decision.notes,
             )
@@ -264,13 +253,28 @@ class UrlEvaluator:
             )
             return evaluation
 
+    async def _collect_initial_links(self, *, candidate: UrlCandidate, intent: str) -> list[str]:
+        graph = SiteGraph(
+            config=self.config,
+            telemetry=self.telemetry,
+            url_id=candidate.url_id,
+            intent=intent,
+            seed_url=candidate.canonical_url,
+            domain=candidate.domain,
+        )
+        await graph.bootstrap(self.fetcher)
+        frontier = graph.next_frontier(limit=max(self.config.max_site_graph_frontier, self.config.max_internal_links))
+        links = [node.canonical_url for node in frontier if node.canonical_url and node.canonical_url != candidate.canonical_url]
+        return _unique_links(links)
+
     async def _decide(
         self,
         *,
         intent: str,
         candidate: UrlCandidate,
         render_profile: str,
-        site_graph: SiteGraph,
+        initial_links: list[str],
+        page_evidence,
         browser_result,
         api_probe,
     ) -> EvaluationDecision:
@@ -278,7 +282,21 @@ class UrlEvaluator:
             "intent": intent,
             "candidate": candidate.model_dump(),
             "render_profile": render_profile,
-            "site_graph": site_graph.prompt_context(max_nodes=max(self.config.max_site_graph_visits + 4, 8)),
+            "initial_links": initial_links[:80],
+            "visited_pages": [
+                {
+                    "url": evidence.url,
+                    "title": evidence.title,
+                    "text_excerpt": evidence.text_excerpt[:500],
+                    "api_signal": evidence.api_signal.model_dump(mode="json"),
+                    "paywall_present": evidence.paywall_present,
+                    "contact_sales_present": evidence.contact_sales_present,
+                    "auth_required": evidence.auth_required,
+                    "captcha_present": evidence.captcha_present,
+                    "data_signals": evidence.data_signals,
+                }
+                for evidence in page_evidence
+            ],
             "browser_result": browser_result.model_dump(mode="json") if browser_result else None,
             "api_probe": api_probe.model_dump(mode="json") if api_probe else None,
         }
@@ -288,7 +306,7 @@ class UrlEvaluator:
                 "Decide whether this website is a useful datasource for the intent.\n\n"
                 f"{prompt}\n\n"
                 "Rules:\n"
-                "- Use only the visited page summaries from `site_graph.visited_pages` as page-history evidence.\n"
+                "- Use only visited_pages, browser_result, and api_probe as evidence.\n"
                 "- `data_on_site` when valuable data appears directly on the site or portal.\n"
                 "- `api_available` when API/docs/endpoints are present and seem workable.\n"
                 "- `contact_sales_only` when only sales/demo access exists.\n"
@@ -334,3 +352,14 @@ class UrlEvaluator:
                 if "graphql" in lowered and link not in merged.graphql_hints:
                     merged.graphql_hints.append(link)
         return merged
+
+
+def _unique_links(links: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for link in links:
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        unique.append(link)
+    return unique

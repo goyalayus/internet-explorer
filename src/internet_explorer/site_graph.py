@@ -224,6 +224,8 @@ class SiteGraph:
         added: list[str] = []
         with self._lock:
             source = self._nodes.get(canonicalize_url(from_url))
+            if source is None:
+                source = self._ensure_node(from_url, discovered_via=discovered_via, depth=0)
             if source is None or source.depth >= self.config.max_link_depth:
                 return added
             for link in links[: self.config.max_internal_links]:

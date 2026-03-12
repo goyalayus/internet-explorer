@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import re
 import uuid
 from threading import Lock
 from typing import Any
@@ -8,7 +11,6 @@ from typing import Any
 from internet_explorer.config import AppConfig
 from internet_explorer.models import BrowserDelegateResult, BrowserStep
 from internet_explorer.repo_bridge import load_eu_swarm_modules
-from internet_explorer.site_graph import SiteGraph
 from internet_explorer.telemetry import Telemetry
 
 VALID_OUTCOMES = {
@@ -36,35 +38,6 @@ class BrowserDelegationManager:
     def peak(self) -> int:
         return self._peak
 
-    def _wrap_tools(self, agent: Any, session_name: str) -> None:
-        ToolFunction = self.modules["ToolFunction"]
-        wrapped_tools = []
-        for tool in agent.tools:
-            if not tool.name.startswith("bu_"):
-                wrapped_tools.append(tool)
-                continue
-
-            def make_fn(original_tool):
-                def _fn(**kwargs):
-                    kwargs.setdefault("session_name", session_name)
-                    if original_tool.name == "bu_open":
-                        kwargs.setdefault("headed", self.config.browser_headed)
-                        kwargs.setdefault("browser_mode", self.config.browser_mode)
-                    return original_tool.fn(**kwargs)
-
-                return _fn
-
-            wrapped_tools.append(
-                ToolFunction(
-                    name=tool.name,
-                    description=tool.description,
-                    fn=make_fn(tool),
-                    input_model=tool.input_model,
-                    output_model=tool.output_model,
-                )
-            )
-        agent.tools = wrapped_tools
-
     def _inc(self) -> int:
         with self._lock:
             self._active += 1
@@ -78,25 +51,39 @@ class BrowserDelegationManager:
             self._active = max(0, self._active - 1)
             return self._active
 
-    async def delegate(self, *, url: str, intent: str, url_id: str, site_graph: SiteGraph | None = None) -> BrowserDelegateResult:
+    async def delegate(
+        self,
+        *,
+        url: str,
+        intent: str,
+        url_id: str,
+        initial_links: list[str] | None = None,
+    ) -> BrowserDelegateResult:
         if self._semaphore is not None:
             async with self._semaphore:
-                return await self._delegate_unbounded(url=url, intent=intent, url_id=url_id, site_graph=site_graph)
-        return await self._delegate_unbounded(url=url, intent=intent, url_id=url_id, site_graph=site_graph)
+                return await self._delegate_unbounded(url=url, intent=intent, url_id=url_id, initial_links=initial_links or [])
+        return await self._delegate_unbounded(url=url, intent=intent, url_id=url_id, initial_links=initial_links or [])
 
-    async def _delegate_unbounded(self, *, url: str, intent: str, url_id: str, site_graph: SiteGraph | None) -> BrowserDelegateResult:
+    async def _delegate_unbounded(
+        self,
+        *,
+        url: str,
+        intent: str,
+        url_id: str,
+        initial_links: list[str],
+    ) -> BrowserDelegateResult:
         session_name = f"ie_{url_id}_{uuid.uuid4().hex[:8]}"
         active = self._inc()
         self.telemetry.emit(
             phase="browser_delegate",
             actor="system",
             url_id=url_id,
-            input_payload={"url": url, "intent": intent, "session_name": session_name},
+            input_payload={"url": url, "intent": intent, "session_name": session_name, "initial_links_count": len(initial_links)},
             output_summary={"active_browser_sessions": active},
             decision="delegate_start",
         )
         try:
-            result = await asyncio.to_thread(self._run_delegate_sync, session_name, url, intent, url_id, site_graph)
+            result = await asyncio.to_thread(self._run_delegate_sync, session_name, url, intent, url_id, initial_links)
             self.telemetry.emit(
                 phase="browser_delegate",
                 actor="browser_agent",
@@ -126,12 +113,34 @@ class BrowserDelegationManager:
                 decision="delegate_end",
             )
 
-    def _run_delegate_sync(self, session_name: str, url: str, intent: str, url_id: str, site_graph: SiteGraph | None) -> BrowserDelegateResult:
+    def _run_delegate_sync(
+        self,
+        session_name: str,
+        url: str,
+        intent: str,
+        url_id: str,
+        initial_links: list[str],
+    ) -> BrowserDelegateResult:
+        plan = self._plan_browser_task(intent=intent, start_url=url, url_id=url_id, initial_links=initial_links)
+        native_result = asyncio.run(
+            self._run_browser_use_native(
+                browser_task=self._build_browser_task(intent=intent, start_url=plan.start_url, initial_links=initial_links, plan_task=plan.browser_task),
+                start_url=plan.start_url,
+                max_steps=plan.max_steps,
+            )
+        )
+        return self._to_delegate_result(
+            session_name=session_name,
+            intent=intent,
+            start_url=plan.start_url,
+            plan=plan.model_dump(mode="json"),
+            native_result=native_result,
+        )
+
+    def _plan_browser_task(self, *, intent: str, start_url: str, url_id: str, initial_links: list[str]):
         AzureOpenAIProvider = self.modules["AzureOpenAIProvider"]
         create_agent = self.modules["create_agent"]
-        Task = self.modules["Task"]
-        close_session = self.modules["close_session"]
-        ToolFunction = self.modules["ToolFunction"]
+        SmartScraperPlan = self.modules["SmartScraperPlan"]
 
         provider = AzureOpenAIProvider(
             model=self.config.azure_openai_model,
@@ -140,88 +149,201 @@ class BrowserDelegationManager:
             api_version=self.config.azure_openai_api_version,
             temperature=0.0,
         )
-        workspace = self.config.eu_swarm_path / "smart_scraping_path_identifier"
-        extra_tools = site_graph.build_browser_tools(ToolFunction) if site_graph is not None else None
-        agent = create_agent(
+        planner = create_agent(
             provider=provider,
-            workspace=workspace,
             debug_mode=False,
             max_iterations=18,
-            extra_tools=extra_tools,
         )
-        if extra_tools:
-            existing = {tool.name for tool in agent.tools}
-            agent.tools.extend(tool for tool in extra_tools if tool.name not in existing)
-        self._wrap_tools(agent, session_name)
-        task = Task(
-            description=(
-                "You are evaluating a website as a possible datasource for a user intent.\n\n"
-                f"Intent:\n{intent}\n\n"
-                f"Start URL:\n{url}\n\n"
-                f"Hard requirements:\n"
-                f"- Use the browser tools on session_name `{session_name}`.\n"
-                "- Start with bu_open then bu_state.\n"
-                "- Explore enough pages to decide whether this source is useful.\n"
-                "- If the page is clearly dynamic/hard to inspect statically, keep exploring with browser tools.\n"
-                "- Detect whether the source has data on site, an API, only contact-sales, a paywall, or is irrelevant.\n"
-                "- If captcha or phone OTP appears, stop and report it.\n"
-                "- If payment/paywall appears during signup or access, classify as paywall.\n"
-                "- Do not buy anything.\n"
-                "- Use sg_read_tree or sg_get_frontier when helpful to understand the current site structure.\n"
-                "- When you inspect an important page, use sg_record_page with a concise summary instead of relying on long history.\n"
-                "- If you discover important internal pages, use sg_add_links so the shared site graph stays current.\n"
-            ),
-            expected_output="JSON with task_result, recipe, evidence, assumptions, confidence",
-            output_schema={
-                "task_result": "object",
-                "recipe": "array",
-                "evidence": "array",
-                "assumptions": "array",
-                "confidence": "number",
+        links_block = "\n".join(f"- {link}" for link in initial_links[:40]) if initial_links else "- (none)"
+        planning_task = (
+            "You are planning browser automation for datasource evaluation.\n\n"
+            f"Intent:\n{intent}\n\n"
+            f"Start URL:\n{start_url}\n\n"
+            f"Initial links list:\n{links_block}\n\n"
+            "Output structured plan only."
+        )
+        raw_plan = planner.execute(planning_task)
+        plan = SmartScraperPlan.model_validate(raw_plan)
+        self.telemetry.emit(
+            phase="browser_delegate",
+            actor="normal_agent",
+            url_id=url_id,
+            input_payload={"intent": intent, "start_url": start_url},
+            output_summary=plan.model_dump(mode="json"),
+            decision="planner_output",
+        )
+        return plan
+
+    async def _run_browser_use_native(self, *, browser_task: str, start_url: str, max_steps: int) -> dict[str, Any]:
+        BrowserUseAgent = self.modules["BrowserUseAgent"]
+        BrowserUseBrowser = self.modules["BrowserUseBrowser"]
+        llm = self._create_browser_use_llm()
+
+        browser = BrowserUseBrowser(headless=not self.config.browser_headed, keep_alive=False)
+        await browser.start()
+        try:
+            agent = BrowserUseAgent(
+                task=browser_task,
+                browser=browser,
+                llm=llm,
+                directly_open_url=True,
+            )
+            history = await agent.run(max_steps=max_steps)
+            return {
+                "final_result": history.final_result() if hasattr(history, "final_result") else None,
+                "is_successful": history.is_successful() if hasattr(history, "is_successful") else None,
+                "action_history": history.action_history() if hasattr(history, "action_history") else [],
+                "urls": history.urls() if hasattr(history, "urls") else [],
+                "errors": history.errors() if hasattr(history, "errors") else [],
+                "extracted_content": history.extracted_content() if hasattr(history, "extracted_content") else [],
+            }
+        finally:
+            await browser.stop()
+
+    def _create_browser_use_llm(self):
+        get_llm_by_name = self.modules["get_browser_use_llm_by_name"]
+        model_name = os.getenv("BROWSER_USE_LLM_MODEL", "").strip()
+        if model_name:
+            try:
+                return get_llm_by_name(model_name)
+            except Exception:
+                return None
+        try:
+            if self.config.azure_openai_api_key and self.config.azure_openai_endpoint:
+                return get_llm_by_name("azure_gpt_4_1_mini")
+            if os.getenv("OPENAI_API_KEY"):
+                return get_llm_by_name("openai_gpt_4o_mini")
+            if os.getenv("GOOGLE_API_KEY"):
+                return get_llm_by_name("google_gemini_2_5_flash")
+        except Exception:
+            return None
+        return None
+
+    def _build_browser_task(self, *, intent: str, start_url: str, initial_links: list[str], plan_task: str) -> str:
+        links_block = "\n".join(f"- {link}" for link in initial_links[:80]) if initial_links else "- (none)"
+        return (
+            f"{plan_task}\n\n"
+            "Datasource evaluation requirements:\n"
+            f"- Intent: {intent}\n"
+            f"- Start URL: {start_url}\n"
+            "- You can navigate to other URLs in this domain when useful.\n"
+            "- Use the initial links list as hints; you are not restricted to it.\n"
+            "- If captcha appears, stop and report captcha.\n"
+            "- If payment/paywall appears for access, classify paywall.\n"
+            "- If source has mostly contact-sales flow, classify contact_sales_only.\n"
+            "- Return STRICT JSON with keys:\n"
+            "  classification, useful, why_useful, how_to_use, render_path,\n"
+            "  data_on_site, api_detected, api_accessible_guess,\n"
+            "  contact_sales_only, paywall_present, auth_required, captcha_present,\n"
+            "  relevant_links, confidence.\n\n"
+            f"Initial links list:\n{links_block}"
+        )
+
+    def _to_delegate_result(
+        self,
+        *,
+        session_name: str,
+        intent: str,
+        start_url: str,
+        plan: dict[str, Any],
+        native_result: dict[str, Any],
+    ) -> BrowserDelegateResult:
+        parsed = _extract_json_dict(native_result.get("final_result"))
+        classification = str((parsed or {}).get("classification", "unknown")).strip()
+        if classification not in VALID_OUTCOMES:
+            classification = "unknown"
+
+        urls = [str(item) for item in native_result.get("urls", []) if item]
+        extracted = [str(item) for item in native_result.get("extracted_content", []) if item]
+        relevant_links = [str(item) for item in (parsed or {}).get("relevant_links", []) if item]
+        if not relevant_links:
+            relevant_links = urls[:20]
+        evidence_snippets = extracted[:10]
+
+        recipe = _history_to_recipe(native_result.get("action_history", []))
+        confidence = float((parsed or {}).get("confidence", 0.0) or (0.8 if native_result.get("is_successful") else 0.4))
+
+        return BrowserDelegateResult(
+            session_name=session_name,
+            classification=classification,
+            useful=bool((parsed or {}).get("useful", False)),
+            why_useful=str((parsed or {}).get("why_useful", "")),
+            how_to_use=str((parsed or {}).get("how_to_use", "")),
+            render_path=str((parsed or {}).get("render_path", "browser_use_native")),
+            data_on_site=bool((parsed or {}).get("data_on_site", False)),
+            api_detected=bool((parsed or {}).get("api_detected", False)),
+            api_accessible_guess=bool((parsed or {}).get("api_accessible_guess", False)),
+            contact_sales_only=bool((parsed or {}).get("contact_sales_only", False)),
+            paywall_present=bool((parsed or {}).get("paywall_present", False)),
+            auth_required=bool((parsed or {}).get("auth_required", False)),
+            captcha_present=bool((parsed or {}).get("captcha_present", False)),
+            relevant_links=relevant_links,
+            evidence_snippets=evidence_snippets,
+            recipe=recipe,
+            confidence=confidence,
+            raw_output={
+                "intent": intent,
+                "start_url": start_url,
+                "plan": plan,
+                "native": native_result,
+                "parsed_final_result": parsed,
             },
         )
-        try:
-            raw = task.execute(agent)
-            task_result = raw.get("task_result", {}) if isinstance(raw, dict) else {}
-            recipe = raw.get("recipe", []) if isinstance(raw, dict) else []
-            parsed_recipe = [
+
+
+def _extract_json_dict(raw: Any) -> dict[str, Any] | None:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        pass
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def _history_to_recipe(action_history: Any) -> list[BrowserStep]:
+    if not isinstance(action_history, list):
+        return []
+    recipe: list[BrowserStep] = []
+    step_no = 1
+    for item in action_history:
+        if isinstance(item, list):
+            actions = item
+        else:
+            actions = [item]
+        for action in actions:
+            if isinstance(action, dict):
+                if len(action) == 1:
+                    action_name = next(iter(action))
+                    params = action.get(action_name, {})
+                else:
+                    action_name = str(action.get("action", "browser_action"))
+                    params = {key: value for key, value in action.items() if key != "action"}
+                observations = {}
+            else:
+                action_name = str(action)
+                params = {}
+                observations = {}
+            recipe.append(
                 BrowserStep(
-                    step_no=index + 1,
-                    action=str(step.get("action", "")),
-                    params=step.get("params", {}) if isinstance(step, dict) else {},
-                    observations=step.get("observations", {}) if isinstance(step, dict) else {},
+                    step_no=step_no,
+                    action=action_name,
+                    params=params if isinstance(params, dict) else {"value": params},
+                    observations=observations,
                 )
-                for index, step in enumerate(recipe if isinstance(recipe, list) else [])
-            ]
-            evidence_snippets = []
-            for evidence in raw.get("evidence", []) if isinstance(raw, dict) else []:
-                if isinstance(evidence, dict) and evidence.get("snippet"):
-                    evidence_snippets.append(str(evidence["snippet"]))
-            classification = str(task_result.get("classification", "unknown")).strip()
-            if classification not in VALID_OUTCOMES:
-                classification = "unknown"
-            return BrowserDelegateResult(
-                session_name=session_name,
-                classification=classification,
-                useful=bool(task_result.get("useful", False)),
-                why_useful=str(task_result.get("why_useful", "")),
-                how_to_use=str(task_result.get("how_to_use", "")),
-                render_path=str(task_result.get("render_path", "")),
-                data_on_site=bool(task_result.get("data_on_site", False)),
-                api_detected=bool(task_result.get("api_detected", False)),
-                api_accessible_guess=bool(task_result.get("api_accessible_guess", False)),
-                contact_sales_only=bool(task_result.get("contact_sales_only", False)),
-                paywall_present=bool(task_result.get("paywall_present", False)),
-                auth_required=bool(task_result.get("auth_required", False)),
-                captcha_present=bool(task_result.get("captcha_present", False)),
-                relevant_links=[str(link) for link in task_result.get("relevant_links", []) if link],
-                evidence_snippets=evidence_snippets,
-                recipe=parsed_recipe,
-                confidence=float(raw.get("confidence", 0.0)) if isinstance(raw, dict) else 0.0,
-                raw_output=raw if isinstance(raw, dict) else {},
             )
-        finally:
-            try:
-                close_session(session_name=session_name, all_sessions=False)
-            except Exception:
-                pass
+            step_no += 1
+    return recipe

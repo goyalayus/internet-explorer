@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from internet_explorer.config import AppConfig
 from internet_explorer.llm import LLMClient
-from internet_explorer.models import QueryPlan, QueryResponse, Strategy, StrategyResponse
+from internet_explorer.models import QueryPlan, Strategy
 from internet_explorer.telemetry import Telemetry
 
 
@@ -113,4 +113,3 @@ class StrategyPlanner:
             latency_ms=self.telemetry.elapsed_ms(started),
         )
         return queries
-

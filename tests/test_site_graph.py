@@ -202,3 +202,33 @@ def test_site_graph_frontier_prioritizes_relevant_pages(tmp_path: Path) -> None:
     assert frontier[0].canonical_url in {"https://example.com/rfp/current", "https://example.com/docs/api"}
     assert "https://example.com/docs/api" in frontier_urls
     assert "https://example.com/rfp/current" in frontier_urls
+
+
+def test_site_graph_allows_browser_added_links_from_direct_deep_page(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    graph = SiteGraph(
+        config=config,
+        telemetry=_TelemetryStub(),
+        url_id="url_4",
+        intent="find api docs",
+        seed_url="https://example.com/",
+        domain="example.com",
+    )
+
+    deep_url = "https://example.com/docs/v1/hi/okay.html"
+    child_url = "https://example.com/docs/v1/openapi.json"
+
+    added = graph.add_links(
+        deep_url,
+        [child_url],
+        discovered_via="browser_click",
+    )
+
+    snapshot = graph.snapshot()
+    urls = {node.canonical_url for node in snapshot.nodes}
+    edges = {(edge.from_url, edge.to_url) for edge in snapshot.edges}
+
+    assert added == [child_url]
+    assert deep_url in urls
+    assert child_url in urls
+    assert (deep_url, child_url) in edges

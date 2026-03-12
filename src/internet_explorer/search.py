@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 from internet_explorer.config import AppConfig
 from internet_explorer.models import QueryPlan, SearchResult
@@ -57,4 +56,3 @@ class GoogleSearchCollector:
         for batch in batches:
             results.extend(batch)
         return results
-

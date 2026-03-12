@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 
 from internet_explorer.browser_delegate import BrowserDelegationManager
-from internet_explorer.canonicalize import canonical_domain, canonicalize_url, load_baseline_domains, registrable_domain
+from internet_explorer.canonicalize import canonicalize_url, load_baseline_domains, registrable_domain
 from internet_explorer.config import AppConfig
 from internet_explorer.evaluator import UrlEvaluator
 from internet_explorer.fetcher import AsyncWebFetcher
