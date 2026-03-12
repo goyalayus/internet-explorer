@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from internet_explorer.api_probe import ApiProbeService
 from internet_explorer.browser_delegate import BrowserDelegationManager
-from internet_explorer.canonicalize import registrable_domain
+from internet_explorer.canonicalize import canonicalize_url, registrable_domain
 from internet_explorer.config import AppConfig
 from internet_explorer.fetcher import AsyncWebFetcher, analyze_page, detect_render_profile
 from internet_explorer.llm import LLMClient
-from internet_explorer.models import ApiSignal, EvaluationDecision, UrlCandidate, UrlEvaluation
+from internet_explorer.models import (
+    ApiSignal,
+    EvaluationDecision,
+    NavigationMemoryEntry,
+    ToolDuplicateSignal,
+    UrlCandidate,
+    UrlEvaluation,
+)
 from internet_explorer.site_graph import SiteGraph
 from internet_explorer.telemetry import Telemetry
+from internet_explorer.tool_inventory import ToolInventory
 
 
 class _DecisionEnvelope(BaseModel):
@@ -23,9 +33,32 @@ class _DecisionEnvelope(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class _NavigationPlanEnvelope(BaseModel):
+    reasoning: str
+    action: str
+    target_url: str = ""
+    action_notes: list[str] = Field(default_factory=list)
+
+
+class _ToolTermEnvelope(BaseModel):
+    terms: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
 DECISION_SYSTEM_PROMPT = """
 You decide whether a website is a useful datasource for a given intent.
 Be strict and evidence-based. Return only JSON.
+"""
+
+NAVIGATION_SYSTEM_PROMPT = """
+You are the normal agent planning one navigation step at a time.
+Use bounded exploration and pick only one action.
+Return only JSON.
+"""
+
+TOOL_TERM_SYSTEM_PROMPT = """
+Extract concise provider/tool identity terms to check if a candidate duplicates known tooling.
+Return only JSON.
 """
 
 VALID_OUTCOMES = {
@@ -37,6 +70,7 @@ VALID_OUTCOMES = {
     "unknown",
 }
 VALID_API_STAGES = {"none", "api_detected", "api_accessible", "api_relevant", "api_viable"}
+VALID_NAV_ACTIONS = {"fetch_url", "read_node", "delegate_browser", "stop"}
 
 
 class UrlEvaluator:
@@ -47,106 +81,213 @@ class UrlEvaluator:
         fetcher: AsyncWebFetcher,
         telemetry: Telemetry,
         browser_manager: BrowserDelegationManager,
+        tool_inventory: ToolInventory | None = None,
     ) -> None:
         self.config = config
         self.llm = llm
         self.fetcher = fetcher
         self.telemetry = telemetry
         self.browser_manager = browser_manager
+        self.tool_inventory = tool_inventory
         self.api_probe = ApiProbeService(telemetry, llm, timeout_seconds=max(config.request_timeout_seconds, 30))
 
     async def evaluate(self, *, intent: str, candidate: UrlCandidate) -> UrlEvaluation:
         started = self.telemetry.timed()
         try:
+            graph, initial_links = await self._bootstrap_graph(candidate=candidate, intent=intent)
             page_evidence = []
             browser_result = None
+            visited_memory: list[NavigationMemoryEntry] = []
+            visited_urls: set[str] = set()
+            previous_reasoning = ""
+            node_context_for_next_turn: dict[str, Any] = {}
             render_profile = "hybrid"
 
-            initial_links = await self._collect_initial_links(candidate=candidate, intent=intent)
+            step_limit = max(1, self.config.max_site_graph_visits)
+            for step_no in range(1, step_limit + 1):
+                node_context = node_context_for_next_turn
+                node_context_for_next_turn = {}
 
-            fetched = await self.fetcher.fetch(candidate.canonical_url)
-            self.telemetry.emit(
-                phase="page_fetch",
-                actor="system",
-                strategy_id=candidate.strategy_id,
-                query_id=candidate.query_id,
-                url_id=candidate.url_id,
-                input_payload={"url": candidate.canonical_url, "visit_index": 1},
-                output_summary={"status_code": fetched.status_code, "final_url": fetched.final_url},
-                decision="seed_page_fetched",
-            )
-
-            render_profile = detect_render_profile(fetched.html)
-            self.telemetry.emit(
-                phase="render_detect",
-                actor="normal_agent",
-                url_id=candidate.url_id,
-                input_payload={"url": fetched.final_url},
-                output_summary={"render_profile": render_profile},
-                decision=render_profile,
-            )
-
-            seed_evidence = analyze_page(fetched)
-            page_evidence.append(seed_evidence)
-            initial_links = _unique_links(initial_links + seed_evidence.relevant_links)
-
-            if render_profile == "csr_shell":
-                browser_result = await self.browser_manager.delegate(
-                    url=fetched.final_url,
+                plan = await self._plan_navigation_step(
                     intent=intent,
-                    url_id=candidate.url_id,
+                    candidate=candidate,
+                    graph=graph,
                     initial_links=initial_links,
+                    page_evidence=page_evidence,
+                    visited_memory=visited_memory,
+                    previous_reasoning=previous_reasoning,
+                    node_context=node_context,
+                    step_no=step_no,
                 )
-            else:
-                follow_limit = max(0, min(self.config.max_internal_links, self.config.max_site_graph_visits - 1))
-                followed = 0
-                for link in initial_links:
-                    if followed >= follow_limit:
-                        break
-                    if not link or registrable_domain(link) != candidate.domain:
-                        continue
-                    if link == candidate.canonical_url:
-                        continue
-                    followed += 1
-                    try:
-                        linked_fetch = await self.fetcher.fetch(link)
-                    except Exception as exc:
-                        self.telemetry.emit(
-                            phase="link_follow",
-                            actor="system",
-                            strategy_id=candidate.strategy_id,
-                            query_id=candidate.query_id,
-                            url_id=candidate.url_id,
-                            input_payload={"url": link, "visit_index": followed + 1},
-                            output_summary={"error": str(exc)},
-                            decision="initial_link_failed",
-                            error_code=type(exc).__name__,
-                        )
-                        continue
+                previous_reasoning = plan.reasoning[:1200]
+                self.telemetry.emit(
+                    phase="triage",
+                    actor="normal_agent",
+                    strategy_id=candidate.strategy_id,
+                    query_id=candidate.query_id,
+                    url_id=candidate.url_id,
+                    input_payload={"step_no": step_no},
+                    output_summary=plan.model_dump(mode="json"),
+                    decision=f"navigation_{plan.action}",
+                )
 
+                if plan.action == "stop":
+                    break
+
+                if plan.action == "read_node":
+                    read_url = self._resolve_target_url(
+                        target_url=plan.target_url,
+                        candidate=candidate,
+                        initial_links=initial_links,
+                        visited_urls=visited_urls,
+                        graph=graph,
+                        allow_visited=True,
+                    )
+                    node = graph.get_node(read_url) if read_url else None
+                    node_context_for_next_turn = (
+                        {
+                            "url": node.canonical_url,
+                            "title": node.title,
+                            "page_type_guess": node.page_type_guess,
+                            "status": node.status,
+                            "summary": node.summary,
+                            "signals": node.signals,
+                        }
+                        if node
+                        else {}
+                    )
                     self.telemetry.emit(
-                        phase="link_follow",
+                        phase="site_graph_tool",
                         actor="normal_agent",
                         strategy_id=candidate.strategy_id,
                         query_id=candidate.query_id,
                         url_id=candidate.url_id,
-                        input_payload={"url": link, "visit_index": followed + 1},
-                        output_summary={"status_code": linked_fetch.status_code, "final_url": linked_fetch.final_url},
-                        decision="initial_link_fetched",
+                        input_payload={"url": read_url},
+                        output_summary={"found": bool(node)},
+                        decision="normal_agent_read_node",
                     )
-                    linked_evidence = analyze_page(linked_fetch)
-                    page_evidence.append(linked_evidence)
+                    continue
 
-                    linked_render = detect_render_profile(linked_fetch.html)
-                    if browser_result is None and linked_render == "csr_shell":
-                        browser_result = await self.browser_manager.delegate(
-                            url=linked_fetch.final_url,
-                            intent=intent,
-                            url_id=candidate.url_id,
-                            initial_links=initial_links,
+                if plan.action == "delegate_browser":
+                    delegate_url = self._resolve_target_url(
+                        target_url=plan.target_url,
+                        candidate=candidate,
+                        initial_links=initial_links,
+                        visited_urls=visited_urls,
+                        graph=graph,
+                        allow_visited=True,
+                    )
+                    if not delegate_url:
+                        continue
+
+                    browser_result = await self.browser_manager.delegate(
+                        url=delegate_url,
+                        intent=intent,
+                        url_id=candidate.url_id,
+                        initial_links=initial_links,
+                    )
+                    graph.record_browser_result(url=delegate_url, result=browser_result)
+                    visited_urls.add(delegate_url)
+                    visited_memory.append(
+                        NavigationMemoryEntry(
+                            step_no=step_no,
+                            url=delegate_url,
+                            summary=_one_line_browser_summary(browser_result),
                         )
-                    if linked_evidence.captcha_present or linked_evidence.paywall_present:
+                    )
+                    if browser_result.captcha_present or browser_result.paywall_present:
                         break
+                    continue
+
+                target_url = self._resolve_target_url(
+                    target_url=plan.target_url,
+                    candidate=candidate,
+                    initial_links=initial_links,
+                    visited_urls=visited_urls,
+                    graph=graph,
+                    allow_visited=False,
+                )
+                if not target_url:
+                    break
+
+                fetch_started = self.telemetry.timed()
+                try:
+                    fetched = await self.fetcher.fetch(target_url)
+                except Exception as exc:
+                    graph.update_node_from_tool(
+                        url=target_url,
+                        title="",
+                        page_type_guess="",
+                        summary=f"Fetch failed: {type(exc).__name__}",
+                        signals=["fetch_failed"],
+                        status="failed",
+                        relevant_links=[],
+                    )
+                    visited_urls.add(target_url)
+                    visited_memory.append(
+                        NavigationMemoryEntry(
+                            step_no=step_no,
+                            url=target_url,
+                            summary=f"fetch failed ({type(exc).__name__})",
+                        )
+                    )
+                    self.telemetry.emit(
+                        phase="page_fetch",
+                        actor="system",
+                        strategy_id=candidate.strategy_id,
+                        query_id=candidate.query_id,
+                        url_id=candidate.url_id,
+                        input_payload={"url": target_url, "step_no": step_no},
+                        output_summary={"error": str(exc)},
+                        decision="fetch_failed",
+                        error_code=type(exc).__name__,
+                        latency_ms=self.telemetry.elapsed_ms(fetch_started),
+                    )
+                    continue
+
+                self.telemetry.emit(
+                    phase="page_fetch",
+                    actor="normal_agent",
+                    strategy_id=candidate.strategy_id,
+                    query_id=candidate.query_id,
+                    url_id=candidate.url_id,
+                    input_payload={"url": target_url, "step_no": step_no},
+                    output_summary={"status_code": fetched.status_code, "final_url": fetched.final_url},
+                    decision="page_fetched",
+                    latency_ms=self.telemetry.elapsed_ms(fetch_started),
+                )
+
+                render_profile = detect_render_profile(fetched.html)
+                self.telemetry.emit(
+                    phase="render_detect",
+                    actor="normal_agent",
+                    strategy_id=candidate.strategy_id,
+                    query_id=candidate.query_id,
+                    url_id=candidate.url_id,
+                    input_payload={"url": fetched.final_url, "step_no": step_no},
+                    output_summary={"render_profile": render_profile},
+                    decision=render_profile,
+                )
+
+                evidence = analyze_page(fetched)
+                page_evidence.append(evidence)
+                graph.record_analysis(
+                    url=fetched.final_url,
+                    render_profile=render_profile,
+                    evidence=evidence,
+                )
+                graph.add_links(fetched.final_url, evidence.relevant_links, discovered_via="html_link")
+                visited_urls.add(canonicalize_url(fetched.final_url))
+                visited_memory.append(
+                    NavigationMemoryEntry(
+                        step_no=step_no,
+                        url=canonicalize_url(fetched.final_url),
+                        summary=_one_line_page_summary(evidence),
+                    )
+                )
+
+                if evidence.captcha_present or evidence.paywall_present:
+                    break
 
             merged_signal = self._merge_api_signal(page_evidence, browser_result)
             api_probe = None
@@ -176,6 +317,7 @@ class UrlEvaluator:
                     page_evidence=page_evidence,
                     browser_result=browser_result,
                     api_probe=api_probe,
+                    visited_memory=visited_memory,
                 )
 
             if api_probe and api_probe.error:
@@ -188,6 +330,24 @@ class UrlEvaluator:
                 decision.api_stage = "api_relevant"
             if api_probe and api_probe.viable_guess:
                 decision.api_stage = "api_viable"
+
+            tool_duplicate_signal = await self._assess_tool_duplicate(
+                intent=intent,
+                candidate=candidate,
+                page_evidence=page_evidence,
+                decision=decision,
+            )
+            if tool_duplicate_signal.duplicate_detected:
+                decision.useful = False
+                decision.outcome = "irrelevant"
+                decision.relevance_score = min(decision.relevance_score, 0.35)
+                decision.notes.append(
+                    "duplicate_tool_inventory:" + ",".join(tool_duplicate_signal.matched_tools[:10])
+                )
+                decision.why_useful = (
+                    "This source appears to duplicate an existing tool/provider already present in the tool-flow baseline."
+                )
+                decision.how_to_use = "Skip for novelty goals unless a human explicitly wants redundancy."
 
             evaluation = UrlEvaluation(
                 url_id=candidate.url_id,
@@ -210,7 +370,9 @@ class UrlEvaluator:
                 auth_required=any(item.auth_required for item in page_evidence) or bool(browser_result and browser_result.auth_required),
                 captcha_present=any(item.captcha_present for item in page_evidence) or bool(browser_result and browser_result.captcha_present),
                 evidence=page_evidence,
-                site_graph=None,
+                site_graph=graph.snapshot(max_nodes=min(self.config.max_site_graph_nodes, 60)),
+                visited_memory=visited_memory,
+                tool_duplicate_signal=tool_duplicate_signal,
                 browser_result=browser_result,
                 notes=decision.notes,
             )
@@ -253,7 +415,7 @@ class UrlEvaluator:
             )
             return evaluation
 
-    async def _collect_initial_links(self, *, candidate: UrlCandidate, intent: str) -> list[str]:
+    async def _bootstrap_graph(self, *, candidate: UrlCandidate, intent: str) -> tuple[SiteGraph, list[str]]:
         graph = SiteGraph(
             config=self.config,
             telemetry=self.telemetry,
@@ -265,7 +427,144 @@ class UrlEvaluator:
         await graph.bootstrap(self.fetcher)
         frontier = graph.next_frontier(limit=max(self.config.max_site_graph_frontier, self.config.max_internal_links))
         links = [node.canonical_url for node in frontier if node.canonical_url and node.canonical_url != candidate.canonical_url]
-        return _unique_links(links)
+        return graph, _unique_links(links)
+
+    async def _plan_navigation_step(
+        self,
+        *,
+        intent: str,
+        candidate: UrlCandidate,
+        graph: SiteGraph,
+        initial_links: list[str],
+        page_evidence: list,
+        visited_memory: list[NavigationMemoryEntry],
+        previous_reasoning: str,
+        node_context: dict[str, Any],
+        step_no: int,
+    ) -> _NavigationPlanEnvelope:
+        frontier = graph.next_frontier(limit=min(self.config.max_site_graph_frontier, 8))
+        prompt = {
+            "intent": intent,
+            "candidate": {
+                "url": candidate.canonical_url,
+                "domain": candidate.domain,
+                "title": candidate.source_title,
+                "snippet": candidate.source_snippet,
+            },
+            "step_no": step_no,
+            "max_steps": max(1, self.config.max_site_graph_visits),
+            "previous_reasoning": previous_reasoning,
+            "visited_memory": [entry.model_dump(mode="json") for entry in visited_memory[-12:]],
+            "frontier": [
+                {
+                    "url": node.canonical_url,
+                    "page_type_guess": node.page_type_guess,
+                    "signals": node.signals,
+                    "priority_score": node.priority_score,
+                }
+                for node in frontier
+            ],
+            "last_page_signals": [
+                {
+                    "url": evidence.url,
+                    "title": evidence.title,
+                    "api_detected": evidence.api_signal.detected,
+                    "paywall": evidence.paywall_present,
+                    "contact_sales": evidence.contact_sales_present,
+                    "captcha": evidence.captcha_present,
+                }
+                for evidence in page_evidence[-4:]
+            ],
+            "temporary_node_context": node_context,
+            "initial_links": initial_links[:40],
+        }
+        try:
+            response = await self.llm.complete_json(
+                system_prompt=NAVIGATION_SYSTEM_PROMPT,
+                user_prompt=(
+                    "Plan one next action for datasource evaluation.\n\n"
+                    f"{prompt}\n\n"
+                    "Rules:\n"
+                    "- Allowed actions: fetch_url, read_node, delegate_browser, stop.\n"
+                    "- Use read_node when you need a long summary of one page node.\n"
+                    "- Keep target_url in the same registrable domain as candidate when possible.\n"
+                    "- Prefer fetch_url before delegate_browser unless JS interaction is likely necessary.\n"
+                    "- If captcha is already present in signals, prefer stop or classify via final decision.\n"
+                    "- Return strict JSON only.\n"
+                ),
+                schema=_NavigationPlanEnvelope,
+                temperature=0.0,
+                max_completion_tokens=700,
+            )
+            action = response.action if response.action in VALID_NAV_ACTIONS else "fetch_url"
+            return _NavigationPlanEnvelope(
+                reasoning=response.reasoning.strip(),
+                action=action,
+                target_url=response.target_url.strip(),
+                action_notes=response.action_notes,
+            )
+        except Exception as exc:
+            return self._fallback_navigation_step(
+                candidate=candidate,
+                frontier=frontier,
+                visited_memory=visited_memory,
+                error=type(exc).__name__,
+            )
+
+    def _fallback_navigation_step(self, *, candidate: UrlCandidate, frontier: list, visited_memory: list[NavigationMemoryEntry], error: str) -> _NavigationPlanEnvelope:
+        visited_urls = {entry.url for entry in visited_memory}
+        if candidate.canonical_url not in visited_urls:
+            return _NavigationPlanEnvelope(
+                reasoning=f"LLM plan fallback ({error}); fetch seed first.",
+                action="fetch_url",
+                target_url=candidate.canonical_url,
+            )
+        for node in frontier:
+            if node.canonical_url not in visited_urls:
+                return _NavigationPlanEnvelope(
+                    reasoning=f"LLM plan fallback ({error}); fetch best frontier page.",
+                    action="fetch_url",
+                    target_url=node.canonical_url,
+                )
+        return _NavigationPlanEnvelope(
+            reasoning=f"LLM plan fallback ({error}); no strong next page.",
+            action="stop",
+            target_url="",
+        )
+
+    def _resolve_target_url(
+        self,
+        *,
+        target_url: str,
+        candidate: UrlCandidate,
+        initial_links: list[str],
+        visited_urls: set[str],
+        graph: SiteGraph,
+        allow_visited: bool,
+    ) -> str:
+        candidate_url = candidate.canonical_url
+        if not visited_urls:
+            return candidate_url
+
+        candidates: list[str] = []
+        if target_url:
+            candidates.append(target_url)
+        candidates.extend(initial_links[: self.config.max_internal_links])
+        candidates.extend(node.canonical_url for node in graph.next_frontier(limit=self.config.max_site_graph_frontier))
+
+        for raw_url in candidates:
+            try:
+                canonical = canonicalize_url(raw_url)
+            except Exception:
+                continue
+            if not canonical:
+                continue
+            if registrable_domain(canonical) != candidate.domain:
+                continue
+            if not allow_visited and canonical in visited_urls:
+                continue
+            return canonical
+        return ""
 
     async def _decide(
         self,
@@ -277,12 +576,14 @@ class UrlEvaluator:
         page_evidence,
         browser_result,
         api_probe,
+        visited_memory: list[NavigationMemoryEntry],
     ) -> EvaluationDecision:
         prompt = {
             "intent": intent,
             "candidate": candidate.model_dump(),
             "render_profile": render_profile,
             "initial_links": initial_links[:80],
+            "visited_memory": [entry.model_dump(mode="json") for entry in visited_memory],
             "visited_pages": [
                 {
                     "url": evidence.url,
@@ -331,6 +632,80 @@ class UrlEvaluator:
             notes=response.notes,
         )
 
+    async def _assess_tool_duplicate(
+        self,
+        *,
+        intent: str,
+        candidate: UrlCandidate,
+        page_evidence: list,
+        decision: EvaluationDecision,
+    ) -> ToolDuplicateSignal:
+        if self.tool_inventory is None or not self.tool_inventory.tool_names:
+            return ToolDuplicateSignal(checked=False, reason="tool_inventory_unavailable")
+
+        prompt = {
+            "intent": intent,
+            "candidate": {
+                "domain": candidate.domain,
+                "title": candidate.source_title,
+                "snippet": candidate.source_snippet,
+                "canonical_url": candidate.canonical_url,
+            },
+            "evidence": [
+                {
+                    "url": item.url,
+                    "title": item.title,
+                    "data_signals": item.data_signals,
+                }
+                for item in page_evidence[:4]
+            ],
+            "decision": {
+                "outcome": decision.outcome,
+                "why_useful": decision.why_useful,
+                "how_to_use": decision.how_to_use,
+            },
+        }
+        try:
+            response = await self.llm.complete_json(
+                system_prompt=TOOL_TERM_SYSTEM_PROMPT,
+                user_prompt=(
+                    "Extract up to 8 concise tool/provider identity terms from this candidate source.\n"
+                    "Focus on brand/platform/provider words that can be matched against an existing tool inventory.\n"
+                    "Avoid generic words like api, data, docs unless part of a name.\n\n"
+                    f"{prompt}\n\n"
+                    "Return strict JSON with `terms` and optional `reason`."
+                ),
+                schema=_ToolTermEnvelope,
+                temperature=0.0,
+                max_completion_tokens=300,
+            )
+            terms = response.terms[:8]
+            reason = response.reason.strip()
+        except Exception as exc:
+            # Keep fallback deterministic when the LLM extraction call fails.
+            terms = [candidate.domain, candidate.source_title]
+            reason = f"fallback:{type(exc).__name__}"
+
+        match = self.tool_inventory.match_terms(terms)
+        signal = ToolDuplicateSignal(
+            checked=True,
+            search_terms=match.terms,
+            matched_tools=match.matched_tools,
+            duplicate_detected=match.duplicate_detected,
+            reason=reason or match.reason,
+        )
+        self.telemetry.emit(
+            phase="triage",
+            actor="normal_agent",
+            strategy_id=candidate.strategy_id,
+            query_id=candidate.query_id,
+            url_id=candidate.url_id,
+            input_payload={"terms": terms, "candidate_domain": candidate.domain},
+            output_summary=signal.model_dump(mode="json"),
+            decision="tool_duplicate_checked",
+        )
+        return signal
+
     def _merge_api_signal(self, page_evidence: list, browser_result) -> ApiSignal:
         merged = ApiSignal()
         for evidence in page_evidence:
@@ -352,6 +727,29 @@ class UrlEvaluator:
                 if "graphql" in lowered and link not in merged.graphql_hints:
                     merged.graphql_hints.append(link)
         return merged
+
+
+def _one_line_page_summary(evidence) -> str:
+    title = evidence.title.strip() if evidence.title else ""
+    bits = []
+    if evidence.api_signal.detected:
+        bits.append("api")
+    if evidence.contact_sales_present:
+        bits.append("contact-sales")
+    if evidence.paywall_present:
+        bits.append("paywall")
+    if evidence.captcha_present:
+        bits.append("captcha")
+    if evidence.data_signals:
+        bits.append("data-signals")
+    signal = f" [{', '.join(bits)}]" if bits else ""
+    base = title or evidence.url
+    return f"{base}{signal}"[:220]
+
+
+def _one_line_browser_summary(result) -> str:
+    reason = (result.why_useful or result.how_to_use or "browser delegation completed").strip()
+    return f"{result.classification}: {reason}"[:220]
 
 
 def _unique_links(links: list[str]) -> list[str]:

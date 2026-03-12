@@ -248,6 +248,14 @@ class SiteGraph:
             frontier.sort(key=lambda node: (-node.priority_score, node.depth, node.canonical_url))
             return [node.model_copy(deep=True) for node in frontier[: (limit or self.config.max_site_graph_frontier)]]
 
+    def get_node(self, url: str) -> SiteGraphNode | None:
+        canonical = _safe_canonical_url(url)
+        if not canonical:
+            return None
+        with self._lock:
+            node = self._nodes.get(canonical)
+            return node.model_copy(deep=True) if node else None
+
     def record_analysis(
         self,
         *,

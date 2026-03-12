@@ -15,6 +15,7 @@ from internet_explorer.persistence import MongoPersistence
 from internet_explorer.search import GoogleSearchCollector
 from internet_explorer.strategy import StrategyPlanner
 from internet_explorer.telemetry import Telemetry
+from internet_explorer.tool_inventory import ToolInventory
 from internet_explorer.vpn import GenericVpnManager
 
 
@@ -45,11 +46,26 @@ class IntentDiscoveryService:
         )
 
         baseline_domains = load_baseline_domains(self.config.baseline_domains_file)
+        tool_inventory = ToolInventory.from_tool_flow(self.config.tool_flow_path)
+        self.persistence.update_run(
+            run_id,
+            {
+                "tool_inventory_count": len(tool_inventory.tool_names),
+                "tool_inventory_preview": tool_inventory.tool_names[:40],
+            },
+        )
         planner = StrategyPlanner(self.config, self.llm, telemetry)
         searcher = GoogleSearchCollector(self.config, telemetry)
         fetcher = AsyncWebFetcher(self.config)
         browser_manager = BrowserDelegationManager(self.config, telemetry, lambda fields: self.persistence.update_run(run_id, fields))
-        evaluator = UrlEvaluator(self.config, self.llm, fetcher, telemetry, browser_manager)
+        evaluator = UrlEvaluator(
+            self.config,
+            self.llm,
+            fetcher,
+            telemetry,
+            browser_manager,
+            tool_inventory=tool_inventory,
+        )
 
         try:
             if self.config.auto_start_vpn:

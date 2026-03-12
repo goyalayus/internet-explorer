@@ -163,6 +163,20 @@ class SiteGraphSnapshot(BaseModel):
     frontier: list[str] = Field(default_factory=list)
 
 
+class NavigationMemoryEntry(BaseModel):
+    step_no: int
+    url: str
+    summary: str
+
+
+class ToolDuplicateSignal(BaseModel):
+    checked: bool = False
+    search_terms: list[str] = Field(default_factory=list)
+    matched_tools: list[str] = Field(default_factory=list)
+    duplicate_detected: bool = False
+    reason: str = ""
+
+
 class UrlEvaluation(BaseModel):
     url_id: str
     canonical_url: str
@@ -185,6 +199,8 @@ class UrlEvaluation(BaseModel):
     captcha_present: bool = False
     evidence: list[PageEvidence] = Field(default_factory=list)
     site_graph: SiteGraphSnapshot | None = None
+    visited_memory: list[NavigationMemoryEntry] = Field(default_factory=list)
+    tool_duplicate_signal: ToolDuplicateSignal = Field(default_factory=ToolDuplicateSignal)
     browser_result: BrowserDelegateResult | None = None
     notes: list[str] = Field(default_factory=list)
 
