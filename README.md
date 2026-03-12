@@ -5,7 +5,7 @@
 It reuses adjacent repos instead of copying code:
 - `../query_optimizer_repo`: Google Custom Search client
 - `../eu-swarm`: browser-agent delegation
-- `../tool-flow`: Mongo/VPN/env source of truth
+- `../tool-flow`: tool baseline inventory + optional VPN script hints
 
 ## What it does
 
@@ -49,8 +49,8 @@ internet-explorer --vpn-stop
 Start from `.env.example`.
 
 Important behavior:
-- If `MONGODB_URI` is empty, config falls back to `../tool-flow/.env -> MONGODB_CREDENTIALS_DEV`.
-- If Azure OpenAI env vars are empty, config also falls back to `../tool-flow/.env`.
+- Config is loaded from this repo's environment (`.env` + process env overrides).
+- `MONGODB_URI` must be set in this repo config.
 - `MAX_BROWSER_CONCURRENCY=0` means unlimited.
 - `MAX_URL_CONCURRENCY=0` means unlimited.
 - `MAX_SITE_GRAPH_FRONTIER` controls how many initial seeded links are passed into browser delegation.
@@ -60,5 +60,6 @@ Important behavior:
 ## Notes
 
 - The discovered `tool-flow` VPN scripts are used as reference material for defaults. The generic starter in this repo runs `openvpn` directly and does not execute those task-specific wrappers.
-- If `AUTO_START_VPN=true`, the service will bring up the tunnel at run start and tear it down at the end only if it started that tunnel itself.
+- If `AUTO_START_VPN=true` (default), CLI startup first ensures VPN is up, then service startup connects to Mongo immediately (ping on init).
+- Service teardown still stops VPN only when that service call started the tunnel itself.
 - Browser peak concurrency is persisted on the run document so crashy experiments still leave a useful number behind in Mongo.

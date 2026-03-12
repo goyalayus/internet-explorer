@@ -43,6 +43,10 @@ async def _run(intent: str, print_config: bool, vpn_start: bool, vpn_stop: bool,
         return 0
     if not config.intent:
         raise SystemExit("Intent is required. Pass --intent or set INTENT in env.")
+    if config.auto_start_vpn:
+        manager = GenericVpnManager(config)
+        status = await asyncio.to_thread(manager.ensure_started)
+        print(json.dumps({"auto_start_vpn": True, "vpn_status": status.model_dump(mode="json")}, indent=2))
     service = IntentDiscoveryService(config)
     summary = await service.run(config.intent)
     print(json.dumps(summary.model_dump(mode="json"), indent=2))

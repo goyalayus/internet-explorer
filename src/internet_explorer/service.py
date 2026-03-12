@@ -34,7 +34,7 @@ class IntentDiscoveryService:
         self.persistence.create_run(
             summary,
             metadata={
-                "tool_flow_env_path": str(self.config.tool_flow_env_path),
+                "env_file_path": str(self.config.tool_flow_env_path),
                 "tool_flow_vpn_scripts": [str(path) for path in self.config.discovered_vpn_scripts],
                 "selected_vpn_start_script": str(self.config.vpn_start_script) if self.config.vpn_start_script else None,
                 "query_optimizer_ovpn_config": str(self.config.query_optimizer_ovpn_config) if self.config.query_optimizer_ovpn_config else None,

@@ -14,6 +14,8 @@ class MongoPersistence:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.client = MongoClient(config.mongodb_uri)
+        # Force an immediate connection attempt so startup fails fast if Mongo is unreachable.
+        self.client.admin.command("ping")
         self.db = self.client[config.mongodb_db]
         self.runs: Collection = self.db[config.mongodb_runs_collection]
         self.url_summaries: Collection = self.db[config.mongodb_url_summaries_collection]
@@ -59,4 +61,3 @@ class MongoPersistence:
             {"$set": doc, "$setOnInsert": {"created_at": datetime.utcnow()}},
             upsert=True,
         )
-
