@@ -1,11 +1,12 @@
 # Internet Explorer
 
-`internet-explorer` is a fresh orchestration service for discovering new datasources for a given intent.
+`internet-explorer` is an orchestration service for discovering new datasources for a given intent.
 
-It reuses adjacent repos instead of copying code:
-- `../query_optimizer_repo`: Google Custom Search client
-- `../eu-swarm`: browser-agent delegation
-- `../tool-flow`: tool baseline inventory + optional VPN script hints
+Runtime dependencies are local to this repo + installed libraries:
+- native Google Custom Search API calls from this repo
+- `eu-swarm` + `browser-use` imports as libraries
+- local known-tools inventory file for duplicate checks
+- local VPN helper scripts/config
 
 ## What it does
 
@@ -54,12 +55,13 @@ Important behavior:
 - `MAX_BROWSER_CONCURRENCY=0` means unlimited.
 - `MAX_URL_CONCURRENCY=0` means unlimited.
 - `MAX_SITE_GRAPH_FRONTIER` controls how many initial seeded links are passed into browser delegation.
-- The generic VPN starter reuses `../query_optimizer_repo/client-config-staging.ovpn`.
-- If `VPN_DOCDB_HOST` is empty, the loader infers the DocDB host default from the discovered `../tool-flow/scripts/vpn_and_run_*.sh` scripts.
+- `KNOWN_TOOLS_FILE` provides the static duplicate-tool baseline.
+- `VPN_OVPN_CONFIG` points to your OpenVPN config path.
+- `VPN_DEFAULTS_FILE` provides local fallback defaults for DocDB host/port and split tunnel preference.
 
 ## Notes
 
-- The discovered `tool-flow` VPN scripts are used as reference material for defaults. The generic starter in this repo runs `openvpn` directly and does not execute those task-specific wrappers.
+- The VPN starter can run through local `scripts/vpn_start.sh` and does not depend on tool-flow/query-optimizer scripts.
 - If `AUTO_START_VPN=true` (default), CLI startup first ensures VPN is up, then service startup connects to Mongo immediately (ping on init).
 - Service teardown still stops VPN only when that service call started the tunnel itself.
 - Browser peak concurrency is persisted on the run document so crashy experiments still leave a useful number behind in Mongo.

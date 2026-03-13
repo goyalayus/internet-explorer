@@ -3,24 +3,17 @@ from pathlib import Path
 from internet_explorer.tool_inventory import ToolInventory
 
 
-def test_tool_inventory_discovers_tools_from_tool_flow_layout(tmp_path: Path) -> None:
-    tool_flow = tmp_path / "tool-flow"
-    utils_dir = tool_flow / "utils"
-    utils_dir.mkdir(parents=True)
+def test_tool_inventory_loads_from_local_static_file(tmp_path: Path) -> None:
+    known_tools = tmp_path / "known_tools.txt"
+    known_tools.write_text(
+        "# comment\n"
+        "coresignal\n"
+        "builtwith\n"
+        "rapidapi\n"
+        "linkedin_api\n"
+    )
 
-    (utils_dir / "coresignal.py").write_text("class CoreSignal: ...\n")
-    (utils_dir / "builtwith.py").write_text("class BuiltWith: ...\n")
-    (utils_dir / "db_utils.py").write_text("# ignored utility\n")
-
-    provider_dir = utils_dir / "RapidApiProvider"
-    provider_dir.mkdir(parents=True)
-    (provider_dir / "linkedin_api.py").write_text("class LinkedInApi: ...\n")
-
-    play = tool_flow / "a_generic_triggers" / "example.py"
-    play.parent.mkdir(parents=True)
-    play.write_text("from utils.rapidapi import RapidApi\nfrom utils.coresignal import CoreSignal\n")
-
-    inventory = ToolInventory.from_tool_flow(tool_flow)
+    inventory = ToolInventory.from_file(known_tools)
 
     assert "coresignal" in inventory.tool_names
     assert "builtwith" in inventory.tool_names

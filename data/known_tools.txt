@@ -1,0 +1,19 @@
+# Known tooling/providers already present in tool-flow baseline.
+apollo
+builtwith
+coresignal
+exa
+facebook_api
+intellizence
+linkedin_api
+peopledatalabs
+rapidapi
+reddit_api
+sales_nav_api
+searchapi
+sec_edgar
+semrush
+theirstack
+threads_api
+twitter_rapidapi
+twitter_v1_enterprise_api

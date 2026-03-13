@@ -48,7 +48,7 @@ class GenericVpnManager:
         return VpnStatus(
             running=running,
             pid=pid if running else None,
-            ovpn_config=str(self.config.query_optimizer_ovpn_config) if self.config.query_optimizer_ovpn_config else None,
+            ovpn_config=str(self.config.vpn_ovpn_config) if self.config.vpn_ovpn_config else None,
             pid_file=str(self.pid_file),
             log_file=str(self.log_file),
             tunnel_interfaces=tunnel_interfaces,
@@ -75,17 +75,29 @@ class GenericVpnManager:
             self.log_file.unlink()
 
         route_before = self._default_route()
-        command = [
-            "sudo",
-            "openvpn",
-            "--config",
-            str(self._require_ovpn_config()),
-            "--daemon",
-            "--writepid",
-            str(self.pid_file),
-            "--log",
-            str(self.log_file),
-        ]
+        if self.config.vpn_start_script and self.config.vpn_start_script.exists():
+            command = [
+                "bash",
+                str(self.config.vpn_start_script),
+                "--config",
+                str(self._require_ovpn_config()),
+                "--pid-file",
+                str(self.pid_file),
+                "--log-file",
+                str(self.log_file),
+            ]
+        else:
+            command = [
+                "sudo",
+                "openvpn",
+                "--config",
+                str(self._require_ovpn_config()),
+                "--daemon",
+                "--writepid",
+                str(self.pid_file),
+                "--log",
+                str(self.log_file),
+            ]
         subprocess.run(command, check=True, capture_output=True, text=True)
         self._wait_for_pid_and_tunnel()
 
@@ -134,9 +146,9 @@ class GenericVpnManager:
         return status
 
     def _require_ovpn_config(self) -> Path:
-        if self.config.query_optimizer_ovpn_config is None or not self.config.query_optimizer_ovpn_config.exists():
-            raise RuntimeError("No OVPN config found. Set QUERY_OPTIMIZER_OVPN_CONFIG or keep ../query_optimizer_repo/client-config-staging.ovpn available.")
-        return self.config.query_optimizer_ovpn_config
+        if self.config.vpn_ovpn_config is None or not self.config.vpn_ovpn_config.exists():
+            raise RuntimeError("No OVPN config found. Set VPN_OVPN_CONFIG.")
+        return self.config.vpn_ovpn_config
 
     def _ensure_base_dependencies(self) -> None:
         for dependency in ("sudo", "ip"):

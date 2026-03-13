@@ -1,22 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 
-IMPORT_PATTERN = re.compile(r"(?:from|import)\s+utils\.([A-Za-z0-9_\.]+)")
 TOKEN_PATTERN = re.compile(r"[a-z0-9]{2,}")
-IGNORED_TOOL_NAMES = {
-    "__init__",
-    "db_utils",
-    "logger",
-    "openai",
-    "openai2",
-    "openAI",
-    "gemini",
-    "aws",
-}
 ALIAS_OVERRIDES: dict[str, set[str]] = {
     "coresignal": {"core signal"},
     "builtwith": {"built with", "tech stack"},
@@ -25,6 +15,26 @@ ALIAS_OVERRIDES: dict[str, set[str]] = {
     "searchapi": {"search api"},
     "peopledatalabs": {"people data labs", "pdl"},
 }
+DEFAULT_TOOL_NAMES = [
+    "apollo",
+    "builtwith",
+    "coresignal",
+    "exa",
+    "facebook_api",
+    "intellizence",
+    "linkedin_api",
+    "peopledatalabs",
+    "rapidapi",
+    "reddit_api",
+    "sales_nav_api",
+    "searchapi",
+    "sec_edgar",
+    "semrush",
+    "theirstack",
+    "threads_api",
+    "twitter_rapidapi",
+    "twitter_v1_enterprise_api",
+]
 
 
 @dataclass(slots=True)
@@ -57,43 +67,11 @@ class ToolInventory:
         return list(self._tool_names)
 
     @classmethod
-    def from_tool_flow(cls, tool_flow_path: Path) -> "ToolInventory":
-        tool_names: set[str] = set()
-
-        utils_dir = tool_flow_path / "utils"
-        if utils_dir.exists():
-            for module_path in utils_dir.glob("*.py"):
-                stem = module_path.stem
-                if stem not in IGNORED_TOOL_NAMES:
-                    tool_names.add(stem.lower())
-
-        provider_dir = utils_dir / "RapidApiProvider"
-        if provider_dir.exists():
-            tool_names.add("rapidapi")
-            for provider_path in provider_dir.glob("*.py"):
-                stem = provider_path.stem
-                if stem != "__init__":
-                    tool_names.add(stem.lower())
-
-        for py_path in cls._iter_python_files(tool_flow_path):
-            try:
-                text = py_path.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                continue
-            for match in IMPORT_PATTERN.finditer(text):
-                module = match.group(1).split(".")[0]
-                if module and module not in IGNORED_TOOL_NAMES:
-                    tool_names.add(module.lower())
-
-        return cls(sorted(tool_names))
-
-    @classmethod
-    def _iter_python_files(cls, root: Path):
-        skip_parts = {".git", "venv", ".venv", "__pycache__", ".pytest_cache"}
-        for path in root.rglob("*.py"):
-            if any(part in skip_parts for part in path.parts):
-                continue
-            yield path
+    def from_file(cls, path: Path) -> "ToolInventory":
+        names = _read_tool_names(path)
+        if not names:
+            names = list(DEFAULT_TOOL_NAMES)
+        return cls(names)
 
     def match_terms(self, terms: list[str]) -> ToolInventoryMatch:
         normalized_terms = [term.strip().lower() for term in terms if term and term.strip()]
@@ -110,9 +88,32 @@ class ToolInventory:
                 matched.append(tool_name)
 
         matched.sort()
-        reason = (
-            "matched_tool_terms"
-            if matched
-            else "no_tool_match"
-        )
+        reason = "matched_tool_terms" if matched else "no_tool_match"
         return ToolInventoryMatch(terms=normalized_terms, matched_tools=matched, reason=reason)
+
+
+def _read_tool_names(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    if path.suffix.lower() == ".json":
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        if isinstance(payload, list):
+            return [str(item).strip() for item in payload if str(item).strip()]
+        if isinstance(payload, dict):
+            tools = payload.get("tools")
+            if isinstance(tools, list):
+                return [str(item).strip() for item in tools if str(item).strip()]
+        return []
+
+    names: list[str] = []
+    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name = line.split("#", 1)[0].strip().split(",", 1)[0].strip()
+        if name:
+            names.append(name)
+    return names

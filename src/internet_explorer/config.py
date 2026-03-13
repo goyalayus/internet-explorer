@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from dotenv import dotenv_values
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, field_validator
 
 
 def _parse_shell_default(script_path: Path | None, variable_name: str) -> str | None:
@@ -35,9 +35,7 @@ class AppConfig(BaseModel):
     azure_openai_endpoint: str = ""
     azure_openai_api_version: str = "2024-12-01-preview"
     azure_openai_model: str = "gpt-4.1"
-    eu_swarm_path: Path
-    query_optimizer_repo_path: Path
-    tool_flow_path: Path
+    eu_swarm_path: Path | None = None
     browser_mode: str = "chromium"
     browser_headed: bool = False
     temp_google_email: str = ""
@@ -45,11 +43,13 @@ class AppConfig(BaseModel):
     temp_signup_email: str = ""
     temp_signup_password: str = ""
     baseline_domains_file: Path
+    known_tools_file: Path
     max_browser_concurrency: int = 0
     max_url_concurrency: int = 0
     vpn_start_script: Path | None = None
     auto_start_vpn: bool = True
-    query_optimizer_ovpn_config: Path | None = None
+    vpn_ovpn_config: Path | None = None
+    vpn_defaults_file: Path | None = None
     vpn_docdb_host: str = ""
     vpn_docdb_port: int = 27017
     vpn_require_split_tunnel: bool = True
@@ -68,46 +68,57 @@ class AppConfig(BaseModel):
     max_sitemap_fetches: int = 6
     request_timeout_seconds: int = 20
     llm_max_retries: int = 2
-    tool_flow_env_path: Path
-    discovered_vpn_scripts: list[Path] = Field(default_factory=list)
+    env_file_path: Path
 
-    @field_validator("workspace_root", "eu_swarm_path", "query_optimizer_repo_path", "tool_flow_path", "baseline_domains_file", "tool_flow_env_path", "vpn_log_dir")
+    @field_validator("workspace_root", "baseline_domains_file", "known_tools_file", "env_file_path", "vpn_log_dir")
     @classmethod
-    def _expand_path(cls, value: Path) -> Path:
+    def _expand_required_path(cls, value: Path) -> Path:
+        return value.expanduser().resolve()
+
+    @field_validator("eu_swarm_path", "vpn_start_script", "vpn_ovpn_config", "vpn_defaults_file")
+    @classmethod
+    def _expand_optional_path(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
         return value.expanduser().resolve()
 
     @classmethod
     def from_env(cls, root: Path | None = None) -> "AppConfig":
         root_dir = (root or Path.cwd()).resolve()
-        tool_flow_path = (root_dir / "../tool-flow").resolve()
-        query_optimizer_repo_path = (root_dir / "../query_optimizer_repo").resolve()
-        eu_swarm_path = (root_dir / "../eu-swarm").resolve()
-        tool_flow_env_path = (root_dir / ".env").resolve()
-        local_env = dotenv_values(tool_flow_env_path) if tool_flow_env_path.exists() else {}
+        env_file_path = (root_dir / ".env").resolve()
+        local_env = dotenv_values(env_file_path) if env_file_path.exists() else {}
 
         def env_value(name: str, default: str = "") -> str:
             return (os.getenv(name) or str(local_env.get(name) or default)).strip()
 
-        discovered_vpn_scripts = sorted((tool_flow_path / "scripts").glob("vpn_and_run_*.sh"))
-        explicit_vpn = env_value("VPN_START_SCRIPT")
-        vpn_start_script = Path(explicit_vpn).expanduser().resolve() if explicit_vpn else None
+        eu_swarm_default = (root_dir / "../eu-swarm").resolve()
+        eu_swarm_path_raw = env_value("EU_SWARM_PATH", str(eu_swarm_default))
+        eu_swarm_path = Path(eu_swarm_path_raw).expanduser().resolve() if eu_swarm_path_raw else None
+
+        vpn_defaults_raw = env_value("VPN_DEFAULTS_FILE", str(root_dir / "scripts/vpn_defaults.sh"))
+        vpn_defaults_file = Path(vpn_defaults_raw).expanduser().resolve() if vpn_defaults_raw else None
+        if vpn_defaults_file and not vpn_defaults_file.exists():
+            vpn_defaults_file = None
+
+        vpn_start_raw = env_value("VPN_START_SCRIPT", str(root_dir / "scripts/vpn_start.sh"))
+        vpn_start_script = Path(vpn_start_raw).expanduser().resolve() if vpn_start_raw else None
         if vpn_start_script and not vpn_start_script.exists():
             vpn_start_script = None
-        reference_vpn_script = vpn_start_script or (discovered_vpn_scripts[0].resolve() if discovered_vpn_scripts else None)
 
-        query_optimizer_ovpn = env_value("QUERY_OPTIMIZER_OVPN_CONFIG")
-        if query_optimizer_ovpn:
-            ovpn_path = Path(query_optimizer_ovpn).expanduser().resolve()
+        vpn_ovpn_raw = env_value("VPN_OVPN_CONFIG") or env_value("QUERY_OPTIMIZER_OVPN_CONFIG")
+        if vpn_ovpn_raw:
+            vpn_ovpn_config = Path(vpn_ovpn_raw).expanduser().resolve()
         else:
-            ovpn_path = (query_optimizer_repo_path / "client-config-staging.ovpn").resolve()
-        if not ovpn_path.exists():
-            ovpn_path = None
+            default_ovpn = (root_dir / "vpn/client-config-staging.ovpn").resolve()
+            vpn_ovpn_config = default_ovpn if default_ovpn.exists() else None
+        if vpn_ovpn_config and not vpn_ovpn_config.exists():
+            vpn_ovpn_config = None
 
-        vpn_docdb_host = env_value("VPN_DOCDB_HOST") or _parse_shell_default(reference_vpn_script, "DOCDB_HOST") or ""
-        vpn_docdb_port = int(env_value("VPN_DOCDB_PORT", _parse_shell_default(reference_vpn_script, "DOCDB_PORT") or "27017"))
+        vpn_docdb_host = env_value("VPN_DOCDB_HOST") or _parse_shell_default(vpn_defaults_file, "DOCDB_HOST") or ""
+        vpn_docdb_port = int(env_value("VPN_DOCDB_PORT", _parse_shell_default(vpn_defaults_file, "DOCDB_PORT") or "27017"))
         vpn_require_split_tunnel = env_value(
             "VPN_REQUIRE_SPLIT_TUNNEL",
-            (_parse_shell_default(reference_vpn_script, "REQUIRE_SPLIT_TUNNEL") or "true"),
+            (_parse_shell_default(vpn_defaults_file, "REQUIRE_SPLIT_TUNNEL") or "true"),
         ).lower() == "true"
         vpn_require_docdb_reachable = env_value("VPN_REQUIRE_DOCDB_REACHABLE", "true").lower() == "true"
         vpn_log_dir = Path(env_value("VPN_LOG_DIR", str(root_dir / ".vpn_logs")))
@@ -132,9 +143,7 @@ class AppConfig(BaseModel):
             azure_openai_endpoint=env_value("AZURE_OPENAI_ENDPOINT"),
             azure_openai_api_version=env_value("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
             azure_openai_model=env_value("AZURE_OPENAI_MODEL", "gpt-4.1"),
-            eu_swarm_path=Path(env_value("EU_SWARM_PATH", str(eu_swarm_path))),
-            query_optimizer_repo_path=query_optimizer_repo_path,
-            tool_flow_path=tool_flow_path,
+            eu_swarm_path=eu_swarm_path,
             browser_mode=env_value("BROWSER_MODE", "chromium"),
             browser_headed=env_value("BROWSER_HEADED", "false").lower() == "true",
             temp_google_email=env_value("TEMP_GOOGLE_EMAIL"),
@@ -142,11 +151,13 @@ class AppConfig(BaseModel):
             temp_signup_email=env_value("TEMP_SIGNUP_EMAIL"),
             temp_signup_password=env_value("TEMP_SIGNUP_PASSWORD"),
             baseline_domains_file=Path(env_value("BASELINE_DOMAINS_FILE", str(root_dir / "data/tool_flow_baseline_domains.txt"))),
+            known_tools_file=Path(env_value("KNOWN_TOOLS_FILE", str(root_dir / "data/known_tools.txt"))),
             max_browser_concurrency=int(env_value("MAX_BROWSER_CONCURRENCY", "0")),
             max_url_concurrency=int(env_value("MAX_URL_CONCURRENCY", "0")),
             vpn_start_script=vpn_start_script,
             auto_start_vpn=env_value("AUTO_START_VPN", "true").lower() == "true",
-            query_optimizer_ovpn_config=ovpn_path,
+            vpn_ovpn_config=vpn_ovpn_config,
+            vpn_defaults_file=vpn_defaults_file,
             vpn_docdb_host=vpn_docdb_host,
             vpn_docdb_port=vpn_docdb_port,
             vpn_require_split_tunnel=vpn_require_split_tunnel,
@@ -165,6 +176,5 @@ class AppConfig(BaseModel):
             max_sitemap_fetches=int(env_value("MAX_SITEMAP_FETCHES", "6")),
             request_timeout_seconds=int(env_value("REQUEST_TIMEOUT_SECONDS", "20")),
             llm_max_retries=int(env_value("LLM_MAX_RETRIES", "2")),
-            tool_flow_env_path=tool_flow_env_path,
-            discovered_vpn_scripts=discovered_vpn_scripts,
+            env_file_path=env_file_path,
         )

@@ -10,6 +10,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.12",
+    "browser-use",
+    "eu-swarm @ git+https://github.com/Recepto-AI/eu-swarm.git@feature/browseruse-single-delegate-loop",
     "httpx>=0.28",
     "openai>=2.16.0",
     "pydantic>=2.11",
@@ -32,4 +34,3 @@ packages = ["src/internet_explorer"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-

@@ -34,19 +34,19 @@ class IntentDiscoveryService:
         self.persistence.create_run(
             summary,
             metadata={
-                "env_file_path": str(self.config.tool_flow_env_path),
-                "tool_flow_vpn_scripts": [str(path) for path in self.config.discovered_vpn_scripts],
+                "env_file_path": str(self.config.env_file_path),
                 "selected_vpn_start_script": str(self.config.vpn_start_script) if self.config.vpn_start_script else None,
-                "query_optimizer_ovpn_config": str(self.config.query_optimizer_ovpn_config) if self.config.query_optimizer_ovpn_config else None,
+                "vpn_ovpn_config": str(self.config.vpn_ovpn_config) if self.config.vpn_ovpn_config else None,
+                "vpn_defaults_file": str(self.config.vpn_defaults_file) if self.config.vpn_defaults_file else None,
                 "vpn_docdb_host": self.config.vpn_docdb_host,
                 "vpn_docdb_port": self.config.vpn_docdb_port,
                 "vpn_log_dir": str(self.config.vpn_log_dir),
-                "eu_swarm_path": str(self.config.eu_swarm_path),
+                "eu_swarm_path": str(self.config.eu_swarm_path) if self.config.eu_swarm_path else None,
             },
         )
 
         baseline_domains = load_baseline_domains(self.config.baseline_domains_file)
-        tool_inventory = ToolInventory.from_tool_flow(self.config.tool_flow_path)
+        tool_inventory = ToolInventory.from_file(self.config.known_tools_file)
         self.persistence.update_run(
             run_id,
             {
@@ -147,6 +147,7 @@ class IntentDiscoveryService:
             raise
         finally:
             await fetcher.close()
+            await searcher.close()
             if self.config.auto_start_vpn and vpn_started_by_service:
                 try:
                     vpn_status = await asyncio.to_thread(vpn_manager.stop)
