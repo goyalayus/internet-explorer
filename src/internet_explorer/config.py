@@ -36,7 +36,7 @@ class AppConfig(BaseModel):
     searchapi_api_key: str = ""
     gemini_api_key: str = ""
     gemini_api_keys: str = ""
-    gemini_model: str = "gemini-3.0-flash"
+    gemini_model: str = "gemini-3-flash-preview"
     azure_openai_api_key: str = ""
     azure_openai_endpoint: str = ""
     azure_openai_api_version: str = "2024-12-01-preview"
@@ -156,7 +156,7 @@ class AppConfig(BaseModel):
             searchapi_api_key=env_value("SEARCHAPI_API_KEY"),
             gemini_api_key=env_value("GEMINI_API_KEY"),
             gemini_api_keys=env_value("GEMINI_API_KEYS"),
-            gemini_model=env_value("GEMINI_MODEL", "gemini-3.0-flash"),
+            gemini_model=env_value("GEMINI_MODEL", "gemini-3-flash-preview"),
             azure_openai_api_key=env_value("AZURE_OPENAI_API_KEY"),
             azure_openai_endpoint=env_value("AZURE_OPENAI_ENDPOINT"),
             azure_openai_api_version=env_value("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
