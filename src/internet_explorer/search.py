@@ -16,6 +16,8 @@ class GoogleSearchCollector:
         self.telemetry = telemetry
         self.endpoint = "https://www.googleapis.com/customsearch/v1"
         self.client = httpx.AsyncClient(timeout=config.request_timeout_seconds)
+        self.api_keys = _parse_api_keys(config.google_api_keys, fallback=config.google_api_key)
+        self._key_cursor = 0
 
     async def collect(self, query_plan: QueryPlan) -> list[SearchResult]:
         all_results: list[SearchResult] = []
@@ -54,7 +56,13 @@ class GoogleSearchCollector:
         return all_results
 
     async def collect_many(self, queries: list[QueryPlan]) -> list[SearchResult]:
-        tasks = [self.collect(query) for query in queries]
+        semaphore = asyncio.Semaphore(max(1, self.config.search_query_concurrency))
+
+        async def run_query(query_plan: QueryPlan):
+            async with semaphore:
+                return await self.collect(query_plan)
+
+        tasks = [run_query(query) for query in queries]
         batches = await asyncio.gather(*tasks)
         results: list[SearchResult] = []
         for batch in batches:
@@ -65,24 +73,65 @@ class GoogleSearchCollector:
         await self.client.aclose()
 
     async def _search_page(self, *, query: str, num: int, start: int) -> list[dict[str, Any]]:
-        if not self.config.google_api_key:
+        if not self.api_keys:
             raise ValueError("GOOGLE_API_KEY is required for Google Custom Search.")
         if not self.config.google_search_engine_id:
             raise ValueError("GOOGLE_SEARCH_ENGINE_ID is required for Google Custom Search.")
 
-        response = await self.client.get(
-            self.endpoint,
-            params={
-                "key": self.config.google_api_key,
-                "cx": self.config.google_search_engine_id,
-                "q": query,
-                "num": num,
-                "start": start,
-            },
-        )
-        if response.status_code >= 400:
-            detail = response.text[:400]
-            raise RuntimeError(f"Google search failed status={response.status_code}: {detail}")
-        payload = response.json()
-        items = payload.get("items")
-        return items if isinstance(items, list) else []
+        attempts = max(1, self.config.search_retry_attempts)
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            base_index = self._next_key_index()
+            for offset in range(len(self.api_keys)):
+                key_index = (base_index + offset) % len(self.api_keys)
+                key = self.api_keys[key_index]
+                try:
+                    response = await self.client.get(
+                        self.endpoint,
+                        params={
+                            "key": key,
+                            "cx": self.config.google_search_engine_id,
+                            "q": query,
+                            "num": num,
+                            "start": start,
+                        },
+                    )
+                except Exception as exc:
+                    last_error = RuntimeError(f"Google search transport error ({type(exc).__name__}): {exc}")
+                    continue
+
+                if response.status_code < 400:
+                    payload = response.json()
+                    items = payload.get("items")
+                    return items if isinstance(items, list) else []
+
+                detail = response.text[:400]
+                retryable = response.status_code in {403, 429, 500, 502, 503, 504}
+                last_error = RuntimeError(f"Google search failed status={response.status_code}: {detail}")
+                if retryable:
+                    continue
+                raise last_error
+
+            if attempt < attempts:
+                backoff = self.config.search_retry_base_backoff_seconds * (2 ** (attempt - 1))
+                await asyncio.sleep(min(backoff, 8.0))
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Google search failed without a captured error")
+
+    def _next_key_index(self) -> int:
+        if not self.api_keys:
+            return 0
+        index = self._key_cursor % len(self.api_keys)
+        self._key_cursor += 1
+        return index
+
+
+def _parse_api_keys(raw: str, *, fallback: str = "") -> list[str]:
+    keys = [item.strip() for item in raw.split(",") if item.strip()]
+    if keys:
+        return keys
+    if fallback.strip():
+        return [fallback.strip()]
+    return []

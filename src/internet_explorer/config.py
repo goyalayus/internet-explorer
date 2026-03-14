@@ -30,7 +30,13 @@ class AppConfig(BaseModel):
     google_api_key: str = ""
     google_api_keys: str = ""
     google_search_engine_id: str = ""
+    search_query_concurrency: int = 8
+    search_retry_attempts: int = 4
+    search_retry_base_backoff_seconds: float = 1.0
     searchapi_api_key: str = ""
+    gemini_api_key: str = ""
+    gemini_api_keys: str = ""
+    gemini_model: str = "gemini-3.0-flash"
     azure_openai_api_key: str = ""
     azure_openai_endpoint: str = ""
     azure_openai_api_version: str = "2024-12-01-preview"
@@ -144,7 +150,13 @@ class AppConfig(BaseModel):
             google_api_key=env_value("GOOGLE_API_KEY"),
             google_api_keys=env_value("GOOGLE_API_KEYS"),
             google_search_engine_id=env_value("GOOGLE_SEARCH_ENGINE_ID"),
+            search_query_concurrency=int(env_value("SEARCH_QUERY_CONCURRENCY", "8")),
+            search_retry_attempts=int(env_value("SEARCH_RETRY_ATTEMPTS", "4")),
+            search_retry_base_backoff_seconds=float(env_value("SEARCH_RETRY_BASE_BACKOFF_SECONDS", "1.0")),
             searchapi_api_key=env_value("SEARCHAPI_API_KEY"),
+            gemini_api_key=env_value("GEMINI_API_KEY"),
+            gemini_api_keys=env_value("GEMINI_API_KEYS"),
+            gemini_model=env_value("GEMINI_MODEL", "gemini-3.0-flash"),
             azure_openai_api_key=env_value("AZURE_OPENAI_API_KEY"),
             azure_openai_endpoint=env_value("AZURE_OPENAI_ENDPOINT"),
             azure_openai_api_version=env_value("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
