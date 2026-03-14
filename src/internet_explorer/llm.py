@@ -125,15 +125,17 @@ def _extract_json_dict(raw: str) -> dict:
     fence_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
     if fence_match:
         text = fence_match.group(1)
-    else:
-        brace_match = re.search(r"\{[\s\S]*\}", text)
-        if brace_match:
-            text = brace_match.group(0)
 
-    parsed = json.loads(text)
-    if not isinstance(parsed, dict):
-        raise ValueError("LLM response JSON is not an object")
-    return parsed
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            parsed, _ = decoder.raw_decode(text[match.start() :])
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+
+    raise ValueError("Could not parse JSON object from LLM response")
 
 
 def _parse_api_keys(raw: str, *, fallback: str = "") -> list[str]:
