@@ -83,7 +83,10 @@ class BrowserDelegationManager:
             decision="delegate_start",
         )
         try:
-            result = await asyncio.to_thread(self._run_delegate_sync, session_name, url, intent, url_id, initial_links)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(self._run_delegate_sync, session_name, url, intent, url_id, initial_links),
+                timeout=max(1, self.config.browser_delegate_timeout_seconds),
+            )
             self.telemetry.emit(
                 phase="browser_delegate",
                 actor="browser_agent",

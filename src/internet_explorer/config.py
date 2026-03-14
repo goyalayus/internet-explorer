@@ -51,6 +51,7 @@ class AppConfig(BaseModel):
     baseline_domains_file: Path
     known_tools_file: Path
     max_browser_concurrency: int = 0
+    browser_delegate_timeout_seconds: int = 180
     max_url_concurrency: int = 0
     url_batch_size: int = 40
     vpn_start_script: Path | None = None
@@ -171,6 +172,7 @@ class AppConfig(BaseModel):
             baseline_domains_file=Path(env_value("BASELINE_DOMAINS_FILE", str(root_dir / "data/tool_flow_baseline_domains.txt"))),
             known_tools_file=Path(env_value("KNOWN_TOOLS_FILE", str(root_dir / "data/known_tools.txt"))),
             max_browser_concurrency=int(env_value("MAX_BROWSER_CONCURRENCY", "0")),
+            browser_delegate_timeout_seconds=int(env_value("BROWSER_DELEGATE_TIMEOUT_SECONDS", "180")),
             max_url_concurrency=int(env_value("MAX_URL_CONCURRENCY", "0")),
             url_batch_size=int(env_value("URL_BATCH_SIZE", "40")),
             vpn_start_script=vpn_start_script,
