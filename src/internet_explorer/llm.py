@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import httpx
 from pydantic import BaseModel
@@ -46,7 +46,8 @@ class LLMClient:
             },
         }
         text = await self._call_gemini(payload=payload)
-        parsed = _extract_json_dict(text)
+        parsed = _extract_json_payload(text)
+        parsed = _normalize_payload_for_schema(parsed, schema=schema)
         return schema.model_validate(parsed)
 
     async def _call_gemini(self, *, payload: dict) -> str:
@@ -111,31 +112,41 @@ def _extract_text_from_gemini_response(payload: dict) -> str:
     return ""
 
 
-def _extract_json_dict(raw: str) -> dict:
+def _extract_json_payload(raw: str) -> Any:
     text = raw.strip()
     if not text:
         return {}
     try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
+        return json.loads(text)
     except Exception:
         pass
 
-    fence_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
     if fence_match:
-        text = fence_match.group(1)
+        try:
+            return json.loads(fence_match.group(1))
+        except Exception:
+            pass
 
     decoder = json.JSONDecoder()
-    for match in re.finditer(r"\{", text):
+    for match in re.finditer(r"[\{\[]", text):
         try:
             parsed, _ = decoder.raw_decode(text[match.start() :])
         except Exception:
             continue
-        if isinstance(parsed, dict):
-            return parsed
+        return parsed
 
     raise ValueError("Could not parse JSON object from LLM response")
+
+
+def _normalize_payload_for_schema(payload: Any, *, schema: type[BaseModel]) -> Any:
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, list):
+        fields = list(schema.model_fields.keys())
+        if len(fields) == 1:
+            return {fields[0]: payload}
+    return payload
 
 
 def _parse_api_keys(raw: str, *, fallback: str = "") -> list[str]:
