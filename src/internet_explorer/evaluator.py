@@ -303,6 +303,7 @@ class UrlEvaluator:
                     evidence=evidence,
                 )
                 graph.add_links(fetched.final_url, evidence.relevant_links, discovered_via="html_link")
+                visited_urls.add(canonicalize_url(target_url))
                 visited_urls.add(canonicalize_url(fetched.final_url))
                 visited_memory.append(
                     NavigationMemoryEntry(
