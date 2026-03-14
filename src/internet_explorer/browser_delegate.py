@@ -103,6 +103,23 @@ class BrowserDelegationManager:
                     extra={"browser_step_no": recipe_step.step_no},
                 )
             return result
+        except Exception as exc:
+            fallback = self._delegate_error_result(
+                session_name=session_name,
+                url=url,
+                intent=intent,
+                error=exc,
+            )
+            self.telemetry.emit(
+                phase="browser_delegate",
+                actor="system",
+                url_id=url_id,
+                input_payload={"url": url},
+                output_summary=fallback.model_dump(mode="json"),
+                decision="delegate_failed_fallback",
+                error_code=type(exc).__name__,
+            )
+            return fallback
         finally:
             active_after = self._dec()
             self.telemetry.emit(
@@ -121,7 +138,19 @@ class BrowserDelegationManager:
         url_id: str,
         initial_links: list[str],
     ) -> BrowserDelegateResult:
-        plan = self._plan_browser_task(intent=intent, start_url=url, url_id=url_id, initial_links=initial_links)
+        try:
+            plan = self._plan_browser_task(intent=intent, start_url=url, url_id=url_id, initial_links=initial_links)
+        except Exception as exc:
+            plan = self._fallback_plan(start_url=url, intent=intent, error=exc)
+            self.telemetry.emit(
+                phase="browser_delegate",
+                actor="normal_agent",
+                url_id=url_id,
+                input_payload={"intent": intent, "start_url": url},
+                output_summary={"plan": plan.model_dump(mode="json"), "planner_error": _exception_to_text(exc)},
+                decision="planner_fallback",
+                error_code=type(exc).__name__,
+            )
         native_result = asyncio.run(
             self._run_browser_use_native(
                 browser_task=self._build_browser_task(intent=intent, start_url=plan.start_url, initial_links=initial_links, plan_task=plan.browser_task),
@@ -173,6 +202,24 @@ class BrowserDelegationManager:
             decision="planner_output",
         )
         return plan
+
+    def _fallback_plan(self, *, start_url: str, intent: str, error: Exception):
+        SmartScraperPlan = self.modules["SmartScraperPlan"]
+        payload = {
+            "planning_summary": "Fallback plan due to planner error.",
+            "browser_task": (
+                "Open the start URL, inspect RFP/data/API signals, and return strict JSON classification "
+                "for datasource usefulness."
+            ),
+            "start_url": start_url,
+            "max_steps": 20,
+            "assumptions": [
+                "Planner unavailable; using direct browser exploration fallback.",
+                f"Planner error: {_exception_to_text(error)}",
+                f"Intent: {intent}",
+            ],
+        }
+        return SmartScraperPlan.model_validate(payload)
 
     async def _run_browser_use_native(self, *, browser_task: str, start_url: str, max_steps: int) -> dict[str, Any]:
         BrowserUseAgent = self.modules["BrowserUseAgent"]
@@ -290,6 +337,39 @@ class BrowserDelegationManager:
             },
         )
 
+    def _delegate_error_result(
+        self,
+        *,
+        session_name: str,
+        url: str,
+        intent: str,
+        error: Exception,
+    ) -> BrowserDelegateResult:
+        return BrowserDelegateResult(
+            session_name=session_name,
+            classification="unknown",
+            useful=False,
+            why_useful="Browser delegation failed before completing exploration.",
+            how_to_use="Retry browser delegation later or inspect logs.",
+            render_path="browser_delegate_fallback",
+            data_on_site=False,
+            api_detected=False,
+            api_accessible_guess=False,
+            contact_sales_only=False,
+            paywall_present=False,
+            auth_required=False,
+            captcha_present=False,
+            relevant_links=[url],
+            evidence_snippets=[],
+            recipe=[],
+            confidence=0.0,
+            raw_output={
+                "intent": intent,
+                "start_url": url,
+                "error": _exception_to_text(error),
+            },
+        )
+
 
 def _extract_json_dict(raw: Any) -> dict[str, Any] | None:
     if isinstance(raw, dict):
@@ -347,3 +427,10 @@ def _history_to_recipe(action_history: Any) -> list[BrowserStep]:
             )
             step_no += 1
     return recipe
+
+
+def _exception_to_text(exc: Exception) -> str:
+    text = str(exc).strip()
+    if text:
+        return text
+    return type(exc).__name__

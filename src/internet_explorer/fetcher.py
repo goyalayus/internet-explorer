@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from html import unescape
 from urllib.parse import urljoin
@@ -54,13 +55,35 @@ DATA_PATTERNS = (
     "procurement",
     "bid notice",
 )
+TRANSIENT_FETCH_ERRORS = (
+    httpx.PoolTimeout,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.ConnectError,
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.WriteError,
+)
 
 
 class AsyncWebFetcher:
     def __init__(self, config: AppConfig) -> None:
+        self.config = config
+        timeout = httpx.Timeout(
+            connect=config.request_timeout_seconds,
+            read=config.request_timeout_seconds,
+            write=config.request_timeout_seconds,
+            pool=config.http_pool_timeout_seconds,
+        )
+        limits = httpx.Limits(
+            max_connections=config.http_max_connections,
+            max_keepalive_connections=config.http_max_keepalive_connections,
+        )
         self.client = httpx.AsyncClient(
             follow_redirects=True,
-            timeout=config.request_timeout_seconds,
+            timeout=timeout,
+            limits=limits,
             headers={
                 "User-Agent": "internet-explorer/0.1 (+datasource-discovery)",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -68,21 +91,34 @@ class AsyncWebFetcher:
         )
 
     async def fetch(self, url: str) -> FetchResult:
-        response = await self.client.get(url)
-        content_type = response.headers.get("content-type", "")
-        body_text = response.text
-        html = response.text if "html" in content_type or not content_type else ""
-        text = _html_to_text(html)[:4000] if html else body_text[:4000]
-        return FetchResult(
-            url=url,
-            final_url=str(response.url),
-            status_code=response.status_code,
-            content_type=content_type,
-            html=html,
-            body_text=body_text,
-            text_excerpt=text,
-            headers=dict(response.headers),
-        )
+        attempts = max(1, self.config.fetch_retry_attempts)
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = await self.client.get(url)
+                content_type = response.headers.get("content-type", "")
+                body_text = response.text
+                html = response.text if "html" in content_type or not content_type else ""
+                text = _html_to_text(html)[:4000] if html else body_text[:4000]
+                return FetchResult(
+                    url=url,
+                    final_url=str(response.url),
+                    status_code=response.status_code,
+                    content_type=content_type,
+                    html=html,
+                    body_text=body_text,
+                    text_excerpt=text,
+                    headers=dict(response.headers),
+                )
+            except TRANSIENT_FETCH_ERRORS as exc:
+                last_exc = exc
+                if attempt >= attempts:
+                    break
+                backoff = self.config.fetch_retry_base_backoff_seconds * (2 ** (attempt - 1))
+                await asyncio.sleep(min(backoff, 8.0))
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("fetch failed without a captured exception")
 
     async def close(self) -> None:
         await self.client.aclose()

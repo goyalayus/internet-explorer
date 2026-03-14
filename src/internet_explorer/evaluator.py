@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from internet_explorer.api_probe import ApiProbeService
 from internet_explorer.browser_delegate import BrowserDelegationManager
@@ -31,6 +31,29 @@ class _DecisionEnvelope(BaseModel):
     how_to_use: str
     api_stage: str
     notes: list[str] = Field(default_factory=list)
+
+
+class _DecisionRawEnvelope(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    useful: bool | str | None = None
+    relevance_score: float | int | str | None = None
+    outcome: str | None = None
+    why_useful: str | None = None
+    how_to_use: str | None = None
+    api_stage: str | None = None
+    notes: list[str] | str | None = None
+
+    # Common alternate keys observed in model outputs.
+    reason: str | None = None
+    category: str | None = None
+    usefulness: bool | str | None = None
+    useful_datasource: bool | str | None = None
+    verdict: str | None = None
+    evidence: str | None = None
+    confidence: float | int | str | None = None
+    score: float | int | str | None = None
+    recommendation: str | None = None
 
 
 class _NavigationPlanEnvelope(BaseModel):
@@ -90,6 +113,7 @@ class UrlEvaluator:
         self.browser_manager = browser_manager
         self.tool_inventory = tool_inventory
         self.api_probe = ApiProbeService(telemetry, llm, timeout_seconds=max(config.request_timeout_seconds, 30))
+        self._domain_bootstrap_cache: dict[str, list[str]] = {}
 
     async def evaluate(self, *, intent: str, candidate: UrlCandidate) -> UrlEvaluation:
         started = self.telemetry.timed()
@@ -102,6 +126,7 @@ class UrlEvaluator:
             previous_reasoning = ""
             node_context_for_next_turn: dict[str, Any] = {}
             render_profile = "hybrid"
+            fetch_failure_count = 0
 
             step_limit = max(1, self.config.max_site_graph_visits)
             for step_no in range(1, step_limit + 1):
@@ -214,6 +239,7 @@ class UrlEvaluator:
                 try:
                     fetched = await self.fetcher.fetch(target_url)
                 except Exception as exc:
+                    fetch_failure_count += 1
                     graph.update_node_from_tool(
                         url=target_url,
                         title="",
@@ -238,7 +264,7 @@ class UrlEvaluator:
                         query_id=candidate.query_id,
                         url_id=candidate.url_id,
                         input_payload={"url": target_url, "step_no": step_no},
-                        output_summary={"error": str(exc)},
+                        output_summary={"error": _describe_exception(exc)},
                         decision="fetch_failed",
                         error_code=type(exc).__name__,
                         latency_ms=self.telemetry.elapsed_ms(fetch_started),
@@ -308,6 +334,16 @@ class UrlEvaluator:
                     api_stage="none",
                     notes=["browser_detected_paywall"],
                 )
+            elif not page_evidence and browser_result is None and fetch_failure_count > 0:
+                decision = EvaluationDecision(
+                    useful=False,
+                    relevance_score=0.0,
+                    outcome="unknown",
+                    why_useful="No page evidence was collected because all fetch attempts failed.",
+                    how_to_use="Retry this source later or run with lower concurrency.",
+                    api_stage="none",
+                    notes=["unknown_fetch_failure", f"fetch_failures:{fetch_failure_count}"],
+                )
             else:
                 decision = await self._decide(
                     intent=intent,
@@ -331,12 +367,15 @@ class UrlEvaluator:
             if api_probe and api_probe.viable_guess:
                 decision.api_stage = "api_viable"
 
-            tool_duplicate_signal = await self._assess_tool_duplicate(
-                intent=intent,
-                candidate=candidate,
-                page_evidence=page_evidence,
-                decision=decision,
-            )
+            if decision.outcome == "unknown" and "unknown_fetch_failure" in decision.notes:
+                tool_duplicate_signal = ToolDuplicateSignal(checked=False, reason="skipped_unknown_fetch_failure")
+            else:
+                tool_duplicate_signal = await self._assess_tool_duplicate(
+                    intent=intent,
+                    candidate=candidate,
+                    page_evidence=page_evidence,
+                    decision=decision,
+                )
             if tool_duplicate_signal.duplicate_detected:
                 decision.useful = False
                 decision.outcome = "irrelevant"
@@ -399,7 +438,7 @@ class UrlEvaluator:
                 useful=False,
                 why_useful="Evaluation failed before the source could be fully assessed.",
                 how_to_use="Inspect the logged events and retry this URL.",
-                notes=[f"evaluation_error:{type(exc).__name__}", str(exc)],
+                notes=[f"evaluation_error:{type(exc).__name__}", _describe_exception(exc)],
             )
             self.telemetry.emit(
                 phase="final_decision",
@@ -424,7 +463,37 @@ class UrlEvaluator:
             seed_url=candidate.canonical_url,
             domain=candidate.domain,
         )
-        await graph.bootstrap(self.fetcher)
+        cached = self._domain_bootstrap_cache.get(candidate.domain)
+        if cached is not None:
+            for link in cached:
+                graph.add_url(link, discovered_via="cache", parent_url=graph.root_url)
+            self.telemetry.emit(
+                phase="site_graph",
+                actor="system",
+                strategy_id=candidate.strategy_id,
+                query_id=candidate.query_id,
+                url_id=candidate.url_id,
+                output_summary={"domain": candidate.domain, "cached_urls": len(cached)},
+                decision="bootstrap_cache_hit",
+            )
+        else:
+            await graph.bootstrap(self.fetcher)
+            cached_frontier = graph.next_frontier(limit=self.config.max_site_graph_nodes)
+            self._domain_bootstrap_cache[candidate.domain] = [
+                node.canonical_url
+                for node in cached_frontier
+                if node.canonical_url and node.canonical_url != candidate.canonical_url
+            ]
+            self.telemetry.emit(
+                phase="site_graph",
+                actor="system",
+                strategy_id=candidate.strategy_id,
+                query_id=candidate.query_id,
+                url_id=candidate.url_id,
+                output_summary={"domain": candidate.domain, "cached_urls": len(self._domain_bootstrap_cache[candidate.domain])},
+                decision="bootstrap_cache_store",
+            )
+
         frontier = graph.next_frontier(limit=max(self.config.max_site_graph_frontier, self.config.max_internal_links))
         links = [node.canonical_url for node in frontier if node.canonical_url and node.canonical_url != candidate.canonical_url]
         return graph, _unique_links(links)
@@ -614,23 +683,16 @@ class UrlEvaluator:
                 "- `paywall` when payment/upgrade is required for access.\n"
                 "- `irrelevant` when it does not materially help the intent.\n"
                 "- Novelty matters, but a non-novel source can still be useful.\n"
+                "- Return JSON with EXACT keys:\n"
+                "  useful (boolean), relevance_score (0..1 float), outcome,\n"
+                "  why_useful, how_to_use, api_stage, notes (list).\n"
                 "- Be strict. Return only JSON.\n"
             ),
-            schema=_DecisionEnvelope,
+            schema=_DecisionRawEnvelope,
             temperature=0.0,
             max_completion_tokens=2048,
         )
-        outcome = response.outcome if response.outcome in VALID_OUTCOMES else "unknown"
-        api_stage = response.api_stage if response.api_stage in VALID_API_STAGES else "none"
-        return EvaluationDecision(
-            useful=response.useful,
-            relevance_score=float(response.relevance_score),
-            outcome=outcome,
-            why_useful=response.why_useful,
-            how_to_use=response.how_to_use,
-            api_stage=api_stage,
-            notes=response.notes,
-        )
+        return _normalize_decision_response(response)
 
     async def _assess_tool_duplicate(
         self,
@@ -761,3 +823,158 @@ def _unique_links(links: list[str]) -> list[str]:
         seen.add(link)
         unique.append(link)
     return unique
+
+
+def _normalize_decision_response(response: _DecisionRawEnvelope) -> EvaluationDecision:
+    notes = _normalize_notes(response.notes)
+    standard_fields_present = all(
+        [
+            response.useful is not None,
+            response.relevance_score is not None,
+            bool((response.outcome or "").strip()),
+            bool((response.why_useful or "").strip()),
+            bool((response.how_to_use or "").strip()),
+            bool((response.api_stage or "").strip()),
+        ]
+    )
+    if not standard_fields_present:
+        notes.append("decision_shape_normalized")
+
+    outcome = _normalize_outcome(response)
+    useful = _normalize_useful(response, outcome=outcome)
+    relevance_score = _normalize_score(response, useful=useful, outcome=outcome)
+    why_useful = (
+        (response.why_useful or "").strip()
+        or (response.evidence or "").strip()
+        or (response.reason or "").strip()
+        or ("Relevant signals were found for this intent." if useful else "Insufficient evidence of intent relevance.")
+    )
+    how_to_use = (
+        (response.how_to_use or "").strip()
+        or (response.recommendation or "").strip()
+        or _default_how_to_use(outcome=outcome, useful=useful)
+    )
+    api_stage = _normalize_api_stage(response, outcome=outcome)
+
+    return EvaluationDecision(
+        useful=useful,
+        relevance_score=relevance_score,
+        outcome=outcome,
+        why_useful=why_useful,
+        how_to_use=how_to_use,
+        api_stage=api_stage,
+        notes=notes,
+    )
+
+
+def _normalize_notes(raw_notes: list[str] | str | None) -> list[str]:
+    if raw_notes is None:
+        return []
+    if isinstance(raw_notes, list):
+        return [str(item).strip() for item in raw_notes if str(item).strip()]
+    value = str(raw_notes).strip()
+    return [value] if value else []
+
+
+def _normalize_outcome(response: _DecisionRawEnvelope) -> str:
+    raw_candidates = [
+        response.outcome,
+        response.category,
+        response.verdict,
+        str(response.usefulness) if response.usefulness is not None else "",
+    ]
+    for candidate in raw_candidates:
+        normalized = _map_outcome(candidate)
+        if normalized != "unknown":
+            return normalized
+    return "unknown"
+
+
+def _map_outcome(value: str | None) -> str:
+    lowered = (value or "").strip().lower()
+    if not lowered:
+        return "unknown"
+    if lowered in VALID_OUTCOMES:
+        return lowered
+    if lowered in {"data", "site_data", "onsite_data", "on_site_data", "portal_data", "dataset", "rfp_data"}:
+        return "data_on_site"
+    if lowered in {"api", "has_api", "api_viable", "developer_api", "api_docs"}:
+        return "api_available"
+    if lowered in {"contact_sales", "sales_only", "contact_only", "demo_required"}:
+        return "contact_sales_only"
+    if lowered in {"paid", "payment_required", "subscription_required", "upgrade_required"}:
+        return "paywall"
+    if lowered in {"not_relevant", "not useful", "unrelated", "irrelevant_source"}:
+        return "irrelevant"
+    return "unknown"
+
+
+def _normalize_useful(response: _DecisionRawEnvelope, *, outcome: str) -> bool:
+    for raw in (response.useful, response.useful_datasource, response.usefulness):
+        coerced = _coerce_bool(raw)
+        if coerced is not None:
+            return coerced
+    if outcome in {"data_on_site", "api_available", "contact_sales_only", "paywall"}:
+        return True
+    if outcome == "irrelevant":
+        return False
+    return False
+
+
+def _normalize_score(response: _DecisionRawEnvelope, *, useful: bool, outcome: str) -> float:
+    for raw in (response.relevance_score, response.confidence, response.score):
+        value = _coerce_float(raw)
+        if value is not None:
+            return max(0.0, min(value, 1.0))
+    if useful:
+        return 0.8 if outcome in {"data_on_site", "api_available"} else 0.6
+    return 0.1
+
+
+def _normalize_api_stage(response: _DecisionRawEnvelope, *, outcome: str) -> str:
+    raw = (response.api_stage or "").strip().lower()
+    if raw in VALID_API_STAGES:
+        return raw
+    if outcome == "api_available":
+        return "api_detected"
+    return "none"
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    lowered = str(value).strip().lower()
+    if lowered in {"true", "1", "yes", "y", "relevant", "useful"}:
+        return True
+    if lowered in {"false", "0", "no", "n", "irrelevant", "not useful"}:
+        return False
+    return None
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _default_how_to_use(*, outcome: str, useful: bool) -> str:
+    if not useful:
+        return "Skip this source for now."
+    return {
+        "data_on_site": "Use page scraping or feed export where available.",
+        "api_available": "Use documented API endpoints with auth/rate-limit handling.",
+        "contact_sales_only": "Store for human follow-up and access evaluation.",
+        "paywall": "Store for human review and paid-access decision.",
+    }.get(outcome, "Store this source for manual follow-up.")
+
+
+def _describe_exception(exc: Exception) -> str:
+    text = str(exc).strip()
+    if text:
+        return text
+    return type(exc).__name__

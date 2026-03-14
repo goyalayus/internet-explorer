@@ -176,7 +176,7 @@ class SiteGraph:
             if isinstance(result, Exception):
                 self._emit(
                     decision="bootstrap_fetch_failed",
-                    output_summary={"path": path, "error": str(result)},
+                    output_summary={"path": path, "error": _exception_text(result)},
                     error_code=type(result).__name__,
                     latency_ms=self.telemetry.elapsed_ms(started),
                 )
@@ -454,7 +454,7 @@ class SiteGraph:
             except Exception as exc:
                 self._emit(
                     decision="sitemap_fetch_failed",
-                    output_summary={"sitemap_url": sitemap_url, "error": str(exc)},
+                    output_summary={"sitemap_url": sitemap_url, "error": _exception_text(exc)},
                     error_code=type(exc).__name__,
                 )
                 continue
@@ -642,6 +642,13 @@ def _safe_canonical_url(url: str | None) -> str:
         return canonicalize_url(url)
     except Exception:
         return ""
+
+
+def _exception_text(exc: Exception) -> str:
+    text = str(exc).strip()
+    if text:
+        return text
+    return type(exc).__name__
 
 
 def _intent_tokens(intent: str) -> set[str]:

@@ -113,7 +113,7 @@ class IntentDiscoveryService:
                 {"raw_result_count": summary.raw_result_count, "unique_url_count": summary.unique_url_count},
             )
 
-            evaluations = await self._evaluate_candidates(intent, deduped_candidates, evaluator)
+            evaluations = await self._evaluate_candidates(intent, deduped_candidates, evaluator, telemetry)
             summary.evaluated_url_count = len(evaluations)
             summary.useful_url_count = sum(1 for evaluation in evaluations if evaluation.useful)
             summary.browser_peak_active = browser_manager.peak
@@ -198,8 +198,15 @@ class IntentDiscoveryService:
         )
         return candidates
 
-    async def _evaluate_candidates(self, intent: str, candidates: list[UrlCandidate], evaluator: UrlEvaluator):
+    async def _evaluate_candidates(
+        self,
+        intent: str,
+        candidates: list[UrlCandidate],
+        evaluator: UrlEvaluator,
+        telemetry: Telemetry,
+    ):
         semaphore = asyncio.Semaphore(self.config.max_url_concurrency) if self.config.max_url_concurrency > 0 else None
+        batch_size = max(1, self.config.url_batch_size)
 
         async def run_one(candidate: UrlCandidate):
             if semaphore is None:
@@ -207,4 +214,35 @@ class IntentDiscoveryService:
             async with semaphore:
                 return await evaluator.evaluate(intent=intent, candidate=candidate)
 
-        return await asyncio.gather(*(run_one(candidate) for candidate in candidates))
+        all_results = []
+        total = len(candidates)
+        for batch_index, start in enumerate(range(0, total, batch_size), start=1):
+            batch = candidates[start : start + batch_size]
+            telemetry.emit(
+                phase="triage",
+                actor="system",
+                input_payload={
+                    "batch_index": batch_index,
+                    "batch_size": len(batch),
+                    "batch_start": start,
+                    "batch_end": start + len(batch),
+                    "total_candidates": total,
+                },
+                output_summary={"url_ids": [candidate.url_id for candidate in batch[:50]]},
+                decision="batch_start",
+            )
+            batch_results = await asyncio.gather(*(run_one(candidate) for candidate in batch))
+            all_results.extend(batch_results)
+            telemetry.emit(
+                phase="triage",
+                actor="system",
+                input_payload={
+                    "batch_index": batch_index,
+                    "batch_size": len(batch),
+                    "completed_total": len(all_results),
+                    "total_candidates": total,
+                },
+                output_summary={"useful_in_batch": sum(1 for item in batch_results if item.useful)},
+                decision="batch_done",
+            )
+        return all_results

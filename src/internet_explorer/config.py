@@ -46,6 +46,7 @@ class AppConfig(BaseModel):
     known_tools_file: Path
     max_browser_concurrency: int = 0
     max_url_concurrency: int = 0
+    url_batch_size: int = 40
     vpn_start_script: Path | None = None
     auto_start_vpn: bool = True
     vpn_ovpn_config: Path | None = None
@@ -67,6 +68,11 @@ class AppConfig(BaseModel):
     max_sitemap_urls: int = 150
     max_sitemap_fetches: int = 6
     request_timeout_seconds: int = 20
+    http_pool_timeout_seconds: int = 30
+    http_max_connections: int = 300
+    http_max_keepalive_connections: int = 100
+    fetch_retry_attempts: int = 3
+    fetch_retry_base_backoff_seconds: float = 0.5
     llm_max_retries: int = 2
     env_file_path: Path
 
@@ -154,6 +160,7 @@ class AppConfig(BaseModel):
             known_tools_file=Path(env_value("KNOWN_TOOLS_FILE", str(root_dir / "data/known_tools.txt"))),
             max_browser_concurrency=int(env_value("MAX_BROWSER_CONCURRENCY", "0")),
             max_url_concurrency=int(env_value("MAX_URL_CONCURRENCY", "0")),
+            url_batch_size=int(env_value("URL_BATCH_SIZE", "40")),
             vpn_start_script=vpn_start_script,
             auto_start_vpn=env_value("AUTO_START_VPN", "true").lower() == "true",
             vpn_ovpn_config=vpn_ovpn_config,
@@ -175,6 +182,11 @@ class AppConfig(BaseModel):
             max_sitemap_urls=int(env_value("MAX_SITEMAP_URLS", "150")),
             max_sitemap_fetches=int(env_value("MAX_SITEMAP_FETCHES", "6")),
             request_timeout_seconds=int(env_value("REQUEST_TIMEOUT_SECONDS", "20")),
+            http_pool_timeout_seconds=int(env_value("HTTP_POOL_TIMEOUT_SECONDS", "30")),
+            http_max_connections=int(env_value("HTTP_MAX_CONNECTIONS", "300")),
+            http_max_keepalive_connections=int(env_value("HTTP_MAX_KEEPALIVE_CONNECTIONS", "100")),
+            fetch_retry_attempts=int(env_value("FETCH_RETRY_ATTEMPTS", "3")),
+            fetch_retry_base_backoff_seconds=float(env_value("FETCH_RETRY_BASE_BACKOFF_SECONDS", "0.5")),
             llm_max_retries=int(env_value("LLM_MAX_RETRIES", "2")),
             env_file_path=env_file_path,
         )

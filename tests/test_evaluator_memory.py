@@ -23,13 +23,16 @@ class _TelemetryStub:
 
 
 class _FetcherStub:
-    def __init__(self, responses: dict[str, FetchResult]) -> None:
+    def __init__(self, responses: dict[str, FetchResult | Exception]) -> None:
         self.responses = responses
 
     async def fetch(self, url: str) -> FetchResult:
         if url not in self.responses:
             raise AssertionError(f"unexpected fetch for {url}")
-        return self.responses[url]
+        value = self.responses[url]
+        if isinstance(value, Exception):
+            raise value
+        return value
 
 
 class _BrowserManagerStub:
@@ -42,9 +45,18 @@ class _BrowserManagerStub:
 
 
 class _LLMStub:
-    def __init__(self, *, tool_terms: list[str]) -> None:
+    def __init__(self, *, tool_terms: list[str], decision_payload: dict | None = None) -> None:
         self.nav_calls = 0
         self.tool_terms = tool_terms
+        self.decision_payload = decision_payload or {
+            "useful": True,
+            "relevance_score": 0.84,
+            "outcome": "data_on_site",
+            "why_useful": "Contains visible RFP listings.",
+            "how_to_use": "Scrape listing pages directly.",
+            "api_stage": "none",
+            "notes": [],
+        }
 
     async def complete_json(self, *, schema, **kwargs):
         name = schema.__name__
@@ -67,18 +79,8 @@ class _LLMStub:
                     "action_notes": [],
                 }
             )
-        if name == "_DecisionEnvelope":
-            return schema.model_validate(
-                {
-                    "useful": True,
-                    "relevance_score": 0.84,
-                    "outcome": "data_on_site",
-                    "why_useful": "Contains visible RFP listings.",
-                    "how_to_use": "Scrape listing pages directly.",
-                    "api_stage": "none",
-                    "notes": [],
-                }
-            )
+        if name in {"_DecisionEnvelope", "_DecisionRawEnvelope"}:
+            return schema.model_validate(self.decision_payload)
         if name == "_ToolTermEnvelope":
             return schema.model_validate({"terms": self.tool_terms, "reason": "stub"})
         raise AssertionError(f"unexpected schema: {name}")
@@ -140,6 +142,18 @@ def _responses() -> dict[str, FetchResult]:
             body_text="",
             text_excerpt="RFP listings and procurement updates",
         ),
+    }
+
+
+def _responses_with_fetch_failures() -> dict[str, FetchResult | Exception]:
+    return {
+        "https://example.com/robots.txt": TimeoutError("pool timeout"),
+        "https://example.com/llms.txt": TimeoutError("pool timeout"),
+        "https://example.com/llm.txt": TimeoutError("pool timeout"),
+        "https://example.com/sitemap.xml": TimeoutError("pool timeout"),
+        "https://example.com/sitemap_index.xml": TimeoutError("pool timeout"),
+        "https://example.com/sitemap-index.xml": TimeoutError("pool timeout"),
+        "https://example.com/": TimeoutError("pool timeout"),
     }
 
 
@@ -211,3 +225,115 @@ async def test_evaluator_marks_duplicate_tool_sources(tmp_path: Path) -> None:
     assert evaluation.outcome == "irrelevant"
     assert evaluation.tool_duplicate_signal.duplicate_detected is True
     assert "coresignal" in evaluation.tool_duplicate_signal.matched_tools
+
+
+@pytest.mark.asyncio
+async def test_evaluator_normalizes_verdict_shape(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    evaluator = UrlEvaluator(
+        config,
+        _LLMStub(
+            tool_terms=["newsource"],
+            decision_payload={
+                "verdict": "data_on_site",
+                "evidence": "RFP tenders are listed directly on page.",
+            },
+        ),
+        _FetcherStub(_responses()),
+        _TelemetryStub(),
+        _BrowserManagerStub(),
+        tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
+    )
+    candidate = UrlCandidate(
+        url_id="url_3",
+        strategy_id="strat_3",
+        query_id="qry_3",
+        raw_url="https://example.com/",
+        canonical_url="https://example.com/",
+        domain="example.com",
+        novelty=True,
+        source_title="Example",
+        source_snippet="",
+        serp_rank=1,
+        serp_page=1,
+    )
+
+    evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
+
+    assert evaluation.useful is True
+    assert evaluation.outcome == "data_on_site"
+    assert evaluation.relevance_score >= 0.6
+    assert all(not note.startswith("evaluation_error:") for note in evaluation.notes)
+
+
+@pytest.mark.asyncio
+async def test_evaluator_normalizes_category_reason_shape(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    evaluator = UrlEvaluator(
+        config,
+        _LLMStub(
+            tool_terms=["newsource"],
+            decision_payload={
+                "useful": False,
+                "category": "irrelevant",
+                "reason": "Not related to procurement or RFP data.",
+            },
+        ),
+        _FetcherStub(_responses()),
+        _TelemetryStub(),
+        _BrowserManagerStub(),
+        tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
+    )
+    candidate = UrlCandidate(
+        url_id="url_4",
+        strategy_id="strat_4",
+        query_id="qry_4",
+        raw_url="https://example.com/",
+        canonical_url="https://example.com/",
+        domain="example.com",
+        novelty=True,
+        source_title="Example",
+        source_snippet="",
+        serp_rank=1,
+        serp_page=1,
+    )
+
+    evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
+
+    assert evaluation.useful is False
+    assert evaluation.outcome == "irrelevant"
+    assert "decision_shape_normalized" in evaluation.notes
+    assert all(not note.startswith("evaluation_error:") for note in evaluation.notes)
+
+
+@pytest.mark.asyncio
+async def test_evaluator_marks_unknown_when_all_fetches_fail(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    evaluator = UrlEvaluator(
+        config,
+        _LLMStub(tool_terms=["newsource"]),
+        _FetcherStub(_responses_with_fetch_failures()),
+        _TelemetryStub(),
+        _BrowserManagerStub(),
+        tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
+    )
+    candidate = UrlCandidate(
+        url_id="url_5",
+        strategy_id="strat_5",
+        query_id="qry_5",
+        raw_url="https://example.com/",
+        canonical_url="https://example.com/",
+        domain="example.com",
+        novelty=True,
+        source_title="Example",
+        source_snippet="",
+        serp_rank=1,
+        serp_page=1,
+    )
+
+    evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
+
+    assert evaluation.useful is False
+    assert evaluation.outcome == "unknown"
+    assert "unknown_fetch_failure" in evaluation.notes
+    assert evaluation.tool_duplicate_signal.checked is False
