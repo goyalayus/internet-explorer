@@ -32,5 +32,8 @@ internet-explorer = "internet_explorer.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/internet_explorer"]
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
