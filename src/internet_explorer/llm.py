@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import base64
 import json
@@ -47,9 +48,11 @@ class LLMClient:
             },
         }
         text = await self._call_gemini(payload=payload)
-        parsed = _extract_json_payload(text)
-        parsed = _normalize_payload_for_schema(parsed, schema=schema)
-        return schema.model_validate(parsed)
+        return await self._decode_schema_payload(
+            raw_text=text,
+            schema=schema,
+            max_completion_tokens=max_completion_tokens,
+        )
 
     async def complete_pdf_json(
         self,
@@ -93,9 +96,11 @@ class LLMClient:
             },
         }
         text = await self._call_gemini(payload=payload)
-        parsed = _extract_json_payload(text)
-        parsed = _normalize_payload_for_schema(parsed, schema=schema)
-        return schema.model_validate(parsed)
+        return await self._decode_schema_payload(
+            raw_text=text,
+            schema=schema,
+            max_completion_tokens=max_completion_tokens,
+        )
 
     async def _call_gemini(self, *, payload: dict) -> str:
         attempts = max(1, self.config.llm_max_retries + 1)
@@ -139,6 +144,77 @@ class LLMClient:
         self._key_cursor += 1
         return index
 
+    async def _decode_schema_payload(
+        self,
+        *,
+        raw_text: str,
+        schema: type[T],
+        max_completion_tokens: int,
+    ) -> T:
+        last_exc: Exception | None = None
+        candidate_text = raw_text
+        for attempt in range(2):
+            try:
+                parsed = _extract_json_payload(candidate_text)
+                parsed = _normalize_payload_for_schema(parsed, schema=schema)
+                return schema.model_validate(parsed)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= 1:
+                    break
+                candidate_text = await self._repair_json_output(
+                    raw_text=candidate_text,
+                    schema=schema,
+                    error=type(exc).__name__,
+                    max_completion_tokens=max_completion_tokens,
+                )
+        if last_exc is not None:
+            raise last_exc
+        raise ValueError("Could not decode schema payload")
+
+    async def _repair_json_output(
+        self,
+        *,
+        raw_text: str,
+        schema: type[BaseModel],
+        error: str,
+        max_completion_tokens: int,
+    ) -> str:
+        schema_keys = list(schema.model_fields.keys())
+        payload = {
+            "systemInstruction": {
+                "parts": [
+                    {
+                        "text": (
+                            "You repair malformed model output into strict JSON. "
+                            "Return only a JSON object that follows the expected keys."
+                        )
+                    }
+                ]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": (
+                                "Repair the following output into strict JSON only.\n\n"
+                                f"Expected keys: {schema_keys}\n"
+                                f"Observed error: {error}\n\n"
+                                f"Output to repair:\n{raw_text}\n"
+                            )
+                        }
+                    ],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.0,
+                "maxOutputTokens": min(max(max_completion_tokens, 512), 2048),
+                "responseMimeType": "application/json",
+            },
+        }
+        return await self._call_gemini(payload=payload)
+
 
 def _extract_text_from_gemini_response(payload: dict) -> str:
     candidates = payload.get("candidates")
@@ -163,24 +239,24 @@ def _extract_json_payload(raw: str) -> Any:
     text = raw.strip()
     if not text:
         return {}
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
+    parsed = _try_parse_json_or_literal(text)
+    if parsed is not None:
+        return parsed
 
     fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
     if fence_match:
-        try:
-            return json.loads(fence_match.group(1))
-        except Exception:
-            pass
+        parsed = _try_parse_json_or_literal(fence_match.group(1))
+        if parsed is not None:
+            return parsed
 
     decoder = json.JSONDecoder()
     for match in re.finditer(r"[\{\[]", text):
         try:
             parsed, _ = decoder.raw_decode(text[match.start() :])
         except Exception:
-            continue
+            parsed = _try_parse_json_or_literal(text[match.start() :])
+            if parsed is None:
+                continue
         return parsed
 
     raise ValueError("Could not parse JSON object from LLM response")
@@ -205,3 +281,17 @@ def _parse_api_keys(raw: str, *, fallback: str = "") -> list[str]:
     if fallback.strip():
         return [fallback.strip()]
     return []
+
+
+def _try_parse_json_or_literal(text: str) -> Any | None:
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    try:
+        parsed = ast.literal_eval(text)
+    except Exception:
+        return None
+    if isinstance(parsed, (dict, list)):
+        return parsed
+    return None

@@ -92,6 +92,53 @@ class PdfVerifierService:
             )
             self._emit(url_id=url_id, intent=intent, pdf_url=canonical_pdf_url, result=result, decision="pdf_verified", started=started)
             return result
+        except ValueError as exc:
+            message = str(exc)
+            if message.startswith("pdf_too_large_for_inline_gemini:"):
+                fallback_url = fetched.final_url if "fetched" in locals() else canonical_pdf_url
+                extracted_signals = _keyword_signals_from_url(fallback_url)
+                strong_signal = any(item in {"rfp", "tender", "procurement", "solicitation", "bid"} for item in extracted_signals)
+                reasoning = (
+                    "PDF is too large for inline verification in this run. "
+                    "Classified using URL/path signals and parent fallback pages."
+                )
+                result = PdfVerificationResult(
+                    url=canonical_pdf_url,
+                    final_url=fallback_url,
+                    status_code=fetched.status_code if "fetched" in locals() else None,
+                    content_type=fetched.content_type if "fetched" in locals() else "application/pdf",
+                    relevant=strong_signal,
+                    reasoning=reasoning,
+                    summary="Large PDF fallback used; confirm relevance from nearby listing pages.",
+                    extracted_signals=extracted_signals[:12],
+                    fallback_urls=_fallback_urls(fallback_url),
+                    source_evidence=(
+                        SourceEvidenceItem(
+                            kind="pdf",
+                            url=canonical_pdf_url,
+                            title="",
+                            summary=(
+                                "Large PDF encountered; URL-based signals suggest procurement relevance."
+                                if strong_signal
+                                else "Large PDF encountered; no strong procurement signal in URL path."
+                            ),
+                        )
+                        if strong_signal
+                        else None
+                    ),
+                    error=message,
+                )
+                self._emit(
+                    url_id=url_id,
+                    intent=intent,
+                    pdf_url=canonical_pdf_url,
+                    result=result,
+                    decision="pdf_verify_large_fallback",
+                    started=started,
+                    error_code="PdfTooLarge",
+                )
+                return result
+            raise
         except Exception as exc:
             result = PdfVerificationResult(
                 url=canonical_pdf_url,
@@ -159,3 +206,21 @@ def _fallback_urls(url: str) -> list[str]:
         if canonical_parent not in urls:
             urls.append(canonical_parent)
     return urls[:4]
+
+
+def _keyword_signals_from_url(url: str) -> list[str]:
+    lowered = canonicalize_url(url).lower()
+    mapping = (
+        ("data annotation", ("data-annotation", "data_annotation", "annotation", "labeling", "labelling")),
+        ("rfp", ("rfp", "request-for-proposal", "request_for_proposal")),
+        ("tender", ("tender", "tenders")),
+        ("procurement", ("procurement", "purchase", "purchasing")),
+        ("solicitation", ("solicitation", "solicitations")),
+        ("bid", ("bid", "bids")),
+        ("ai", ("ai", "artificial-intelligence", "machine-learning", "machine_learning", "ml")),
+    )
+    found: list[str] = []
+    for label, patterns in mapping:
+        if any(pattern in lowered for pattern in patterns):
+            found.append(label)
+    return found

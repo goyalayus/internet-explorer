@@ -98,6 +98,16 @@ class AsyncWebFetcher:
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             },
         )
+        self.insecure_client = httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=timeout,
+            limits=limits,
+            verify=False,
+            headers={
+                "User-Agent": "internet-explorer/0.1 (+datasource-discovery)",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
 
     async def fetch(self, url: str) -> FetchResult:
         attempts = max(1, self.config.fetch_retry_attempts)
@@ -105,26 +115,19 @@ class AsyncWebFetcher:
         for attempt in range(1, attempts + 1):
             try:
                 response = await self.client.get(url)
-                content_type = response.headers.get("content-type", "")
-                content_disposition = response.headers.get("content-disposition", "")
-                is_binary = not _is_textual_content_type(content_type)
-                body_text = response.text if not is_binary else ""
-                html = body_text if ("html" in content_type or (not content_type and not is_binary)) else ""
-                text = _html_to_text(html)[:4000] if html else body_text[:4000]
-                return FetchResult(
-                    url=url,
-                    final_url=str(response.url),
-                    status_code=response.status_code,
-                    content_type=content_type,
-                    content_disposition=content_disposition,
-                    content_length=len(response.content),
-                    is_binary=is_binary,
-                    html=html,
-                    body_text=body_text,
-                    text_excerpt=text,
-                    headers=dict(response.headers),
-                )
+                return _to_fetch_result(url=url, response=response)
             except TRANSIENT_FETCH_ERRORS as exc:
+                if _is_ssl_verification_error(exc):
+                    try:
+                        insecure_response = await self.insecure_client.get(url)
+                        return _to_fetch_result(url=url, response=insecure_response)
+                    except TRANSIENT_FETCH_ERRORS as insecure_exc:
+                        last_exc = insecure_exc
+                        if attempt >= attempts:
+                            break
+                        backoff = self.config.fetch_retry_base_backoff_seconds * (2 ** (attempt - 1))
+                        await asyncio.sleep(min(backoff, 8.0))
+                        continue
                 last_exc = exc
                 if attempt >= attempts:
                     break
@@ -140,17 +143,19 @@ class AsyncWebFetcher:
         for attempt in range(1, attempts + 1):
             try:
                 response = await self.client.get(url)
-                return BinaryFetchResult(
-                    url=url,
-                    final_url=str(response.url),
-                    status_code=response.status_code,
-                    content_type=response.headers.get("content-type", ""),
-                    content_disposition=response.headers.get("content-disposition", ""),
-                    content_length=len(response.content),
-                    content_bytes=response.content,
-                    headers=dict(response.headers),
-                )
+                return _to_binary_fetch_result(url=url, response=response)
             except TRANSIENT_FETCH_ERRORS as exc:
+                if _is_ssl_verification_error(exc):
+                    try:
+                        insecure_response = await self.insecure_client.get(url)
+                        return _to_binary_fetch_result(url=url, response=insecure_response)
+                    except TRANSIENT_FETCH_ERRORS as insecure_exc:
+                        last_exc = insecure_exc
+                        if attempt >= attempts:
+                            break
+                        backoff = self.config.fetch_retry_base_backoff_seconds * (2 ** (attempt - 1))
+                        await asyncio.sleep(min(backoff, 8.0))
+                        continue
                 last_exc = exc
                 if attempt >= attempts:
                     break
@@ -162,6 +167,7 @@ class AsyncWebFetcher:
 
     async def close(self) -> None:
         await self.client.aclose()
+        await self.insecure_client.aclose()
 
 
 def detect_render_profile(html: str) -> RenderProfile:
@@ -269,6 +275,46 @@ def is_pdf_fetch(fetch: FetchResult) -> bool:
     content_type = fetch.content_type.lower()
     disposition = fetch.content_disposition.lower()
     return "application/pdf" in content_type or ".pdf" in disposition or is_probable_pdf_url(fetch.final_url)
+
+
+def _to_fetch_result(*, url: str, response: httpx.Response) -> FetchResult:
+    content_type = response.headers.get("content-type", "")
+    content_disposition = response.headers.get("content-disposition", "")
+    is_binary = not _is_textual_content_type(content_type)
+    body_text = response.text if not is_binary else ""
+    html = body_text if ("html" in content_type or (not content_type and not is_binary)) else ""
+    text = _html_to_text(html)[:4000] if html else body_text[:4000]
+    return FetchResult(
+        url=url,
+        final_url=str(response.url),
+        status_code=response.status_code,
+        content_type=content_type,
+        content_disposition=content_disposition,
+        content_length=len(response.content),
+        is_binary=is_binary,
+        html=html,
+        body_text=body_text,
+        text_excerpt=text,
+        headers=dict(response.headers),
+    )
+
+
+def _to_binary_fetch_result(*, url: str, response: httpx.Response) -> BinaryFetchResult:
+    return BinaryFetchResult(
+        url=url,
+        final_url=str(response.url),
+        status_code=response.status_code,
+        content_type=response.headers.get("content-type", ""),
+        content_disposition=response.headers.get("content-disposition", ""),
+        content_length=len(response.content),
+        content_bytes=response.content,
+        headers=dict(response.headers),
+    )
+
+
+def _is_ssl_verification_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "certificate verify failed" in msg or ("ssl" in msg and "cert" in msg)
 
 
 def _is_textual_content_type(content_type: str) -> bool:
