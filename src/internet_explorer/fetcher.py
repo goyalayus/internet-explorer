@@ -44,7 +44,16 @@ CONTACT_SALES_PATTERNS = (
     "request a demo",
 )
 AUTH_PATTERNS = ("sign in", "log in", "login", "authenticate")
-CAPTCHA_PATTERNS = ("captcha", "recaptcha", "cloudflare turnstile", "i am human")
+CAPTCHA_PATTERNS = (
+    "captcha",
+    "recaptcha",
+    "cloudflare turnstile",
+    "i am human",
+    "just a moment",
+    "checking your browser before accessing",
+    "verify you are human",
+    "security check",
+)
 DATA_PATTERNS = (
     "request for proposal",
     "rfp",
