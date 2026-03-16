@@ -44,6 +44,7 @@ class AppConfig(BaseModel):
     eu_swarm_path: Path | None = None
     browser_mode: str = "chromium"
     browser_headed: bool = False
+    browser_chromium_sandbox: bool = False
     enable_browser_delegation: bool = True
     temp_google_email: str = ""
     temp_google_password: str = ""
@@ -168,6 +169,7 @@ class AppConfig(BaseModel):
             eu_swarm_path=eu_swarm_path,
             browser_mode=env_value("BROWSER_MODE", "chromium"),
             browser_headed=env_value("BROWSER_HEADED", "false").lower() == "true",
+            browser_chromium_sandbox=env_value("BROWSER_CHROMIUM_SANDBOX", "false").lower() == "true",
             enable_browser_delegation=env_value("ENABLE_BROWSER_DELEGATION", "true").lower() == "true",
             temp_google_email=env_value("TEMP_GOOGLE_EMAIL"),
             temp_google_password=env_value("TEMP_GOOGLE_PASSWORD"),

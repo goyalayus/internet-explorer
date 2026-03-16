@@ -254,7 +254,11 @@ class BrowserDelegationManager:
         llm = self._create_browser_use_llm()
         tools = self._build_browser_use_tools(intent=intent, url_id=url_id)
 
-        browser = BrowserUseBrowser(headless=not self.config.browser_headed, keep_alive=False)
+        browser = BrowserUseBrowser(
+            headless=not self.config.browser_headed,
+            keep_alive=False,
+            chromium_sandbox=self.config.browser_chromium_sandbox,
+        )
         await browser.start()
         try:
             agent_kwargs: dict[str, Any] = {
