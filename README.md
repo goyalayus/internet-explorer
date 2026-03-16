@@ -38,6 +38,12 @@ Or use the console entrypoint:
 internet-explorer --intent "your intent here"
 ```
 
+Export a readable post-run path report from Mongo:
+
+```bash
+python scripts/export_run_observations.py --run-id run_123
+```
+
 Generic VPN commands:
 
 ```bash
@@ -56,7 +62,7 @@ Important behavior:
 - `MAX_BROWSER_CONCURRENCY=0` means unlimited.
 - `MAX_URL_CONCURRENCY=0` means unlimited.
 - `CANDIDATE_START_MODE=domain_homepage` means one candidate per unique domain and the normal agent starts from the domain homepage.
-- `CANDIDATE_START_MODE=first_result_url` means one candidate per unique domain but the normal agent starts from the first SERP URL seen for that domain.
+- `CANDIDATE_START_MODE=first_result_url` means one candidate per unique domain but the normal agent starts from the first SERP URL seen for that domain. This branch defaults to `first_result_url`.
 - `MAX_SITE_GRAPH_FRONTIER` controls how many initial seeded links are passed into browser delegation.
 - `PDF_INLINE_MAX_BYTES` limits direct inline Gemini PDF verification size.
 - `KNOWN_TOOLS_FILE` provides the static duplicate-tool baseline.

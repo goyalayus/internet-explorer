@@ -50,7 +50,7 @@ class AppConfig(BaseModel):
     temp_signup_password: str = ""
     baseline_domains_file: Path
     known_tools_file: Path
-    candidate_start_mode: str = "domain_homepage"
+    candidate_start_mode: str = "first_result_url"
     max_browser_concurrency: int = 0
     browser_delegate_timeout_seconds: int = 180
     max_url_concurrency: int = 0
@@ -173,7 +173,7 @@ class AppConfig(BaseModel):
             temp_signup_password=env_value("TEMP_SIGNUP_PASSWORD"),
             baseline_domains_file=Path(env_value("BASELINE_DOMAINS_FILE", str(root_dir / "data/tool_flow_baseline_domains.txt"))),
             known_tools_file=Path(env_value("KNOWN_TOOLS_FILE", str(root_dir / "data/known_tools.txt"))),
-            candidate_start_mode=env_value("CANDIDATE_START_MODE", "domain_homepage"),
+            candidate_start_mode=env_value("CANDIDATE_START_MODE", "first_result_url"),
             max_browser_concurrency=int(env_value("MAX_BROWSER_CONCURRENCY", "0")),
             browser_delegate_timeout_seconds=int(env_value("BROWSER_DELEGATE_TIMEOUT_SECONDS", "180")),
             max_url_concurrency=int(env_value("MAX_URL_CONCURRENCY", "0")),
