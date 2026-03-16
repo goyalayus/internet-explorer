@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -507,6 +508,7 @@ class UrlEvaluator:
             )
             return evaluation
         except Exception as exc:
+            traceback_text = traceback.format_exc(limit=8)
             evaluation = UrlEvaluation(
                 url_id=candidate.url_id,
                 canonical_url=candidate.canonical_url,
@@ -518,7 +520,11 @@ class UrlEvaluator:
                 outcome="unknown",
                 useful=False,
                 reasoning="Evaluation failed before the source could be fully assessed.",
-                notes=[f"evaluation_error:{type(exc).__name__}", _describe_exception(exc)],
+                notes=[
+                    f"evaluation_error:{type(exc).__name__}",
+                    _describe_exception(exc),
+                    f"traceback:{traceback_text[:1400]}",
+                ],
             )
             self.telemetry.emit(
                 phase="final_decision",
