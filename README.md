@@ -38,6 +38,12 @@ Or use the console entrypoint:
 internet-explorer --intent "your intent here"
 ```
 
+Export a readable post-run path report from Mongo:
+
+```bash
+python scripts/export_run_observations.py --run-id run_123
+```
+
 Generic VPN commands:
 
 ```bash
