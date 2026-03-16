@@ -8,8 +8,11 @@ import uuid
 from threading import Lock
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from internet_explorer.config import AppConfig
-from internet_explorer.models import BrowserDelegateResult, BrowserStep
+from internet_explorer.models import BrowserDelegateResult, BrowserStep, SourceEvidenceItem
+from internet_explorer.pdf_verify import PdfVerifierService, pdf_verification_tool_payload
 from internet_explorer.repo_bridge import load_eu_swarm_modules
 from internet_explorer.telemetry import Telemetry
 
@@ -23,11 +26,22 @@ VALID_OUTCOMES = {
 }
 
 
+class _VerifyPdfUrlInput(BaseModel):
+    pdf_url: str = Field(..., min_length=1, description="Direct PDF URL to verify against the current intent.")
+
+
 class BrowserDelegationManager:
-    def __init__(self, config: AppConfig, telemetry: Telemetry, update_run_callback) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        telemetry: Telemetry,
+        update_run_callback,
+        pdf_verifier: PdfVerifierService | None = None,
+    ) -> None:
         self.config = config
         self.telemetry = telemetry
         self.update_run_callback = update_run_callback
+        self.pdf_verifier = pdf_verifier
         self.modules = load_eu_swarm_modules(config)
         self._lock = Lock()
         self._active = 0
@@ -158,6 +172,8 @@ class BrowserDelegationManager:
             self._run_browser_use_native(
                 browser_task=self._build_browser_task(intent=intent, start_url=plan.start_url, initial_links=initial_links, plan_task=plan.browser_task),
                 start_url=plan.start_url,
+                intent=intent,
+                url_id=url_id,
                 max_steps=plan.max_steps,
             )
         )
@@ -211,7 +227,7 @@ class BrowserDelegationManager:
         payload = {
             "planning_summary": "Fallback plan due to planner error.",
             "browser_task": (
-                "Open the start URL, inspect RFP/data/API signals, and return strict JSON classification "
+                "Open the start URL, inspect RFP/data/API/PDF signals, and return strict JSON classification "
                 "for datasource usefulness."
             ),
             "start_url": start_url,
@@ -224,20 +240,33 @@ class BrowserDelegationManager:
         }
         return SmartScraperPlan.model_validate(payload)
 
-    async def _run_browser_use_native(self, *, browser_task: str, start_url: str, max_steps: int) -> dict[str, Any]:
+    async def _run_browser_use_native(
+        self,
+        *,
+        browser_task: str,
+        start_url: str,
+        intent: str,
+        url_id: str,
+        max_steps: int,
+    ) -> dict[str, Any]:
         BrowserUseAgent = self.modules["BrowserUseAgent"]
         BrowserUseBrowser = self.modules["BrowserUseBrowser"]
         llm = self._create_browser_use_llm()
+        tools = self._build_browser_use_tools(intent=intent, url_id=url_id)
 
         browser = BrowserUseBrowser(headless=not self.config.browser_headed, keep_alive=False)
         await browser.start()
         try:
-            agent = BrowserUseAgent(
-                task=browser_task,
-                browser=browser,
-                llm=llm,
-                directly_open_url=True,
-            )
+            agent_kwargs: dict[str, Any] = {
+                "task": browser_task,
+                "browser": browser,
+                "llm": llm,
+                "directly_open_url": True,
+            }
+            if tools is not None:
+                agent_kwargs["tools"] = tools
+                agent_kwargs["controller"] = tools
+            agent = BrowserUseAgent(**agent_kwargs)
             history = await agent.run(max_steps=max_steps)
             return {
                 "final_result": history.final_result() if hasattr(history, "final_result") else None,
@@ -263,11 +292,35 @@ class BrowserDelegationManager:
                 return get_llm_by_name("azure_gpt_4_1_mini")
             if os.getenv("OPENAI_API_KEY"):
                 return get_llm_by_name("openai_gpt_4o_mini")
-            if os.getenv("GOOGLE_API_KEY"):
+            if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
                 return get_llm_by_name("google_gemini_2_5_flash")
         except Exception:
             return None
         return None
+
+    def _build_browser_use_tools(self, *, intent: str, url_id: str):
+        if self.pdf_verifier is None:
+            return None
+
+        BrowserUseTools = self.modules["BrowserUseTools"]
+        BrowserUseActionResult = self.modules["BrowserUseActionResult"]
+        tools = BrowserUseTools()
+
+        @tools.action(
+            "Verify a direct PDF URL against the current intent and return whether it is relevant evidence.",
+            param_model=_VerifyPdfUrlInput,
+        )
+        async def verify_pdf_url(params: _VerifyPdfUrlInput):
+            result = await self.pdf_verifier.verify(url_id=url_id, intent=intent, pdf_url=params.pdf_url)
+            payload = pdf_verification_tool_payload(result)
+            memory = json.dumps(payload, ensure_ascii=True)
+            return BrowserUseActionResult(
+                extracted_content=memory,
+                long_term_memory=memory,
+                metadata={"pdf_verification": payload},
+            )
+
+        return tools
 
     def _build_browser_task(self, *, intent: str, start_url: str, initial_links: list[str], plan_task: str) -> str:
         links_block = "\n".join(f"- {link}" for link in initial_links[:80]) if initial_links else "- (none)"
@@ -278,14 +331,16 @@ class BrowserDelegationManager:
             f"- Start URL: {start_url}\n"
             "- You can navigate to other URLs in this domain when useful.\n"
             "- Use the initial links list as hints; you are not restricted to it.\n"
+            "- If you hit a direct PDF and the `verify_pdf_url` tool is available, use it.\n"
             "- If captcha appears, stop and report captcha.\n"
             "- If payment/paywall appears for access, classify paywall.\n"
             "- If source has mostly contact-sales flow, classify contact_sales_only.\n"
+            "- Your reasoning must explain both why the source matches the intent and the rough recurring access path for this domain.\n"
             "- Return STRICT JSON with keys:\n"
-            "  classification, useful, why_useful, how_to_use, render_path,\n"
+            "  classification, useful, reasoning, render_path,\n"
             "  data_on_site, api_detected, api_accessible_guess,\n"
             "  contact_sales_only, paywall_present, auth_required, captcha_present,\n"
-            "  relevant_links, confidence.\n\n"
+            "  relevant_links, evidence_snippets, source_evidence, confidence.\n\n"
             f"Initial links list:\n{links_block}"
         )
 
@@ -308,17 +363,19 @@ class BrowserDelegationManager:
         relevant_links = [str(item) for item in (parsed or {}).get("relevant_links", []) if item]
         if not relevant_links:
             relevant_links = urls[:20]
-        evidence_snippets = extracted[:10]
-
-        recipe = _history_to_recipe(native_result.get("action_history", []))
+        evidence_snippets = _coerce_string_list((parsed or {}).get("evidence_snippets")) or extracted[:10]
         confidence = float((parsed or {}).get("confidence", 0.0) or (0.8 if native_result.get("is_successful") else 0.4))
+
+        source_evidence = _coerce_source_evidence((parsed or {}).get("source_evidence"))
+        if not source_evidence:
+            for snippet in evidence_snippets[:3]:
+                source_evidence.append(SourceEvidenceItem(kind="browser_finding", url=start_url, summary=snippet[:800]))
 
         return BrowserDelegateResult(
             session_name=session_name,
             classification=classification,
             useful=bool((parsed or {}).get("useful", False)),
-            why_useful=str((parsed or {}).get("why_useful", "")),
-            how_to_use=str((parsed or {}).get("how_to_use", "")),
+            reasoning=str((parsed or {}).get("reasoning", "")).strip(),
             render_path=str((parsed or {}).get("render_path", "browser_use_native")),
             data_on_site=bool((parsed or {}).get("data_on_site", False)),
             api_detected=bool((parsed or {}).get("api_detected", False)),
@@ -329,7 +386,8 @@ class BrowserDelegationManager:
             captcha_present=bool((parsed or {}).get("captcha_present", False)),
             relevant_links=relevant_links,
             evidence_snippets=evidence_snippets,
-            recipe=recipe,
+            source_evidence=source_evidence,
+            recipe=_history_to_recipe(native_result.get("action_history", [])),
             confidence=confidence,
             raw_output={
                 "intent": intent,
@@ -352,8 +410,7 @@ class BrowserDelegationManager:
             session_name=session_name,
             classification="unknown",
             useful=False,
-            why_useful="Browser delegation failed before completing exploration.",
-            how_to_use="Retry browser delegation later or inspect logs.",
+            reasoning="Browser delegation failed before completing exploration.",
             render_path="browser_delegate_fallback",
             data_on_site=False,
             api_detected=False,
@@ -364,6 +421,7 @@ class BrowserDelegationManager:
             captcha_present=False,
             relevant_links=[url],
             evidence_snippets=[],
+            source_evidence=[],
             recipe=[],
             confidence=0.0,
             raw_output={
@@ -403,10 +461,7 @@ def _history_to_recipe(action_history: Any) -> list[BrowserStep]:
     recipe: list[BrowserStep] = []
     step_no = 1
     for item in action_history:
-        if isinstance(item, list):
-            actions = item
-        else:
-            actions = [item]
+        actions = item if isinstance(item, list) else [item]
         for action in actions:
             if isinstance(action, dict):
                 if len(action) == 1:
@@ -430,6 +485,25 @@ def _history_to_recipe(action_history: Any) -> list[BrowserStep]:
             )
             step_no += 1
     return recipe
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _coerce_source_evidence(value: Any) -> list[SourceEvidenceItem]:
+    if not isinstance(value, list):
+        return []
+    items: list[SourceEvidenceItem] = []
+    for raw in value:
+        try:
+            items.append(SourceEvidenceItem.model_validate(raw))
+        except Exception:
+            if isinstance(raw, str) and raw.strip():
+                items.append(SourceEvidenceItem(kind="browser_finding", url="", summary=raw.strip()[:800]))
+    return items
 
 
 def _exception_to_text(exc: Exception) -> str:

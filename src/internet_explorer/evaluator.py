@@ -8,16 +8,19 @@ from internet_explorer.api_probe import ApiProbeService
 from internet_explorer.browser_delegate import BrowserDelegationManager
 from internet_explorer.canonicalize import canonicalize_url, registrable_domain
 from internet_explorer.config import AppConfig
-from internet_explorer.fetcher import AsyncWebFetcher, analyze_page, detect_render_profile
+from internet_explorer.fetcher import AsyncWebFetcher, analyze_page, detect_render_profile, is_pdf_fetch
 from internet_explorer.llm import LLMClient
 from internet_explorer.models import (
     ApiSignal,
     EvaluationDecision,
     NavigationMemoryEntry,
+    PageEvidence,
+    SourceEvidenceItem,
     ToolDuplicateSignal,
     UrlCandidate,
     UrlEvaluation,
 )
+from internet_explorer.pdf_verify import PdfVerifierService
 from internet_explorer.site_graph import SiteGraph
 from internet_explorer.telemetry import Telemetry
 from internet_explorer.tool_inventory import ToolInventory
@@ -27,9 +30,9 @@ class _DecisionEnvelope(BaseModel):
     useful: bool
     relevance_score: float
     outcome: str
-    why_useful: str
-    how_to_use: str
+    reasoning: str
     api_stage: str
+    source_evidence: list[SourceEvidenceItem] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -39,12 +42,11 @@ class _DecisionRawEnvelope(BaseModel):
     useful: bool | str | None = None
     relevance_score: float | int | str | None = None
     outcome: str | None = None
-    why_useful: str | None = None
-    how_to_use: str | None = None
+    reasoning: str | None = None
     api_stage: str | None = None
+    source_evidence: list[SourceEvidenceItem] | list[dict[str, Any]] | None = None
     notes: list[str] | str | None = None
 
-    # Common alternate keys observed in model outputs.
     reason: str | None = None
     category: str | None = None
     usefulness: bool | str | None = None
@@ -54,6 +56,8 @@ class _DecisionRawEnvelope(BaseModel):
     confidence: float | int | str | None = None
     score: float | int | str | None = None
     recommendation: str | None = None
+    why_useful: str | None = None
+    how_to_use: str | None = None
 
 
 class _NavigationPlanEnvelope(BaseModel):
@@ -69,7 +73,7 @@ class _ToolTermEnvelope(BaseModel):
 
 
 DECISION_SYSTEM_PROMPT = """
-You decide whether a website is a useful datasource for a given intent.
+You decide whether a website or domain is a useful datasource for a given intent.
 Be strict and evidence-based. Return only JSON.
 """
 
@@ -113,13 +117,15 @@ class UrlEvaluator:
         self.browser_manager = browser_manager
         self.tool_inventory = tool_inventory
         self.api_probe = ApiProbeService(telemetry, llm, timeout_seconds=max(config.request_timeout_seconds, 30))
+        self.pdf_verifier = PdfVerifierService(fetcher, llm, telemetry)
         self._domain_bootstrap_cache: dict[str, list[str]] = {}
 
     async def evaluate(self, *, intent: str, candidate: UrlCandidate) -> UrlEvaluation:
         started = self.telemetry.timed()
         try:
             graph, initial_links = await self._bootstrap_graph(candidate=candidate, intent=intent)
-            page_evidence = []
+            page_evidence: list[PageEvidence] = []
+            source_evidence: list[SourceEvidenceItem] = []
             browser_result = None
             visited_memory: list[NavigationMemoryEntry] = []
             visited_urls: set[str] = set()
@@ -139,6 +145,7 @@ class UrlEvaluator:
                     graph=graph,
                     initial_links=initial_links,
                     page_evidence=page_evidence,
+                    source_evidence=source_evidence,
                     visited_memory=visited_memory,
                     previous_reasoning=previous_reasoning,
                     node_context=node_context,
@@ -220,6 +227,8 @@ class UrlEvaluator:
                             summary=_one_line_browser_summary(browser_result),
                         )
                     )
+                    if browser_result.source_evidence:
+                        source_evidence = _merge_source_evidence(source_evidence, browser_result.source_evidence)
                     if browser_result.captcha_present or browser_result.paywall_present:
                         break
                     continue
@@ -278,10 +287,72 @@ class UrlEvaluator:
                     query_id=candidate.query_id,
                     url_id=candidate.url_id,
                     input_payload={"url": target_url, "step_no": step_no},
-                    output_summary={"status_code": fetched.status_code, "final_url": fetched.final_url},
+                    output_summary={"status_code": fetched.status_code, "final_url": fetched.final_url, "content_type": fetched.content_type},
                     decision="page_fetched",
                     latency_ms=self.telemetry.elapsed_ms(fetch_started),
                 )
+
+                visited_urls.add(canonicalize_url(target_url))
+                visited_urls.add(canonicalize_url(fetched.final_url))
+
+                if is_pdf_fetch(fetched):
+                    pdf_result = await self.pdf_verifier.verify(url_id=candidate.url_id, intent=intent, pdf_url=fetched.final_url)
+                    pdf_evidence = PageEvidence(
+                        url=pdf_result.final_url or fetched.final_url,
+                        title=pdf_result.title,
+                        content_type=pdf_result.content_type,
+                        content_kind="pdf",
+                        text_excerpt=pdf_result.summary[:1200],
+                        relevant_links=pdf_result.fallback_urls,
+                        data_signals=pdf_result.extracted_signals,
+                    )
+                    page_evidence.append(pdf_evidence)
+                    graph.update_node_from_tool(
+                        url=fetched.final_url,
+                        title=pdf_result.title,
+                        page_type_guess="rfp" if any("rfp" in signal.lower() for signal in pdf_result.extracted_signals) else "document",
+                        summary=(pdf_result.summary or pdf_result.reasoning)[:1200],
+                        signals=["pdf"] + [item.lower().replace(" ", "_") for item in pdf_result.extracted_signals[:8]],
+                        status="analyzed",
+                        relevant_links=pdf_result.fallback_urls,
+                    )
+                    if pdf_result.source_evidence is not None:
+                        source_evidence = _merge_source_evidence(source_evidence, [pdf_result.source_evidence])
+                    visited_memory.append(
+                        NavigationMemoryEntry(
+                            step_no=step_no,
+                            url=canonicalize_url(fetched.final_url),
+                            summary=_one_line_pdf_summary(pdf_result),
+                        )
+                    )
+                    continue
+
+                if fetched.is_binary and not fetched.html:
+                    binary_evidence = PageEvidence(
+                        url=fetched.final_url,
+                        title="",
+                        content_type=fetched.content_type,
+                        content_kind="binary_file",
+                        text_excerpt="Binary file encountered.",
+                    )
+                    page_evidence.append(binary_evidence)
+                    graph.update_node_from_tool(
+                        url=fetched.final_url,
+                        title="",
+                        page_type_guess="file",
+                        summary=f"Binary file encountered ({fetched.content_type or 'unknown content type'}).",
+                        signals=["binary_file"],
+                        status="analyzed",
+                        relevant_links=[],
+                    )
+                    visited_memory.append(
+                        NavigationMemoryEntry(
+                            step_no=step_no,
+                            url=canonicalize_url(fetched.final_url),
+                            summary=f"binary file ({fetched.content_type or 'unknown'})",
+                        )
+                    )
+                    continue
 
                 render_profile = detect_render_profile(fetched.html)
                 self.telemetry.emit(
@@ -303,8 +374,6 @@ class UrlEvaluator:
                     evidence=evidence,
                 )
                 graph.add_links(fetched.final_url, evidence.relevant_links, discovered_via="html_link")
-                visited_urls.add(canonicalize_url(target_url))
-                visited_urls.add(canonicalize_url(fetched.final_url))
                 visited_memory.append(
                     NavigationMemoryEntry(
                         step_no=step_no,
@@ -330,9 +399,9 @@ class UrlEvaluator:
                     useful=True,
                     relevance_score=max(browser_result.confidence, 0.5),
                     outcome="paywall",
-                    why_useful=browser_result.why_useful or "Relevant source discovered, but access appears gated behind payment.",
-                    how_to_use=browser_result.how_to_use or "Store for human review and possible paid access evaluation.",
+                    reasoning=browser_result.reasoning or "Relevant source discovered, but access appears gated behind payment.",
                     api_stage="none",
+                    source_evidence=browser_result.source_evidence,
                     notes=["browser_detected_paywall"],
                 )
             elif not page_evidence and browser_result is None and fetch_failure_count > 0:
@@ -340,9 +409,9 @@ class UrlEvaluator:
                     useful=False,
                     relevance_score=0.0,
                     outcome="unknown",
-                    why_useful="No page evidence was collected because all fetch attempts failed.",
-                    how_to_use="Retry this source later or run with lower concurrency.",
+                    reasoning="No page evidence was collected because all fetch attempts failed. Retry later or lower concurrency.",
                     api_stage="none",
+                    source_evidence=[],
                     notes=["unknown_fetch_failure", f"fetch_failures:{fetch_failure_count}"],
                 )
             else:
@@ -352,6 +421,7 @@ class UrlEvaluator:
                     render_profile=render_profile,
                     initial_links=initial_links,
                     page_evidence=page_evidence,
+                    source_evidence=source_evidence,
                     browser_result=browser_result,
                     api_probe=api_probe,
                     visited_memory=visited_memory,
@@ -368,6 +438,14 @@ class UrlEvaluator:
             if api_probe and api_probe.viable_guess:
                 decision.api_stage = "api_viable"
 
+            if not decision.source_evidence:
+                decision.source_evidence = _infer_source_evidence(page_evidence, browser_result, source_evidence, api_probe)
+            else:
+                decision.source_evidence = _merge_source_evidence(
+                    _infer_source_evidence(page_evidence, browser_result, source_evidence, api_probe),
+                    decision.source_evidence,
+                )
+
             if decision.outcome == "unknown" and "unknown_fetch_failure" in decision.notes:
                 tool_duplicate_signal = ToolDuplicateSignal(checked=False, reason="skipped_unknown_fetch_failure")
             else:
@@ -381,25 +459,24 @@ class UrlEvaluator:
                 decision.useful = False
                 decision.outcome = "irrelevant"
                 decision.relevance_score = min(decision.relevance_score, 0.35)
-                decision.notes.append(
-                    "duplicate_tool_inventory:" + ",".join(tool_duplicate_signal.matched_tools[:10])
+                decision.notes.append("duplicate_tool_inventory:" + ",".join(tool_duplicate_signal.matched_tools[:10]))
+                decision.reasoning = (
+                    "This source appears to duplicate an existing tool/provider already present in the tool-flow baseline. "
+                    "Skip it for novelty-focused discovery unless a human explicitly wants redundancy."
                 )
-                decision.why_useful = (
-                    "This source appears to duplicate an existing tool/provider already present in the tool-flow baseline."
-                )
-                decision.how_to_use = "Skip for novelty goals unless a human explicitly wants redundancy."
 
             evaluation = UrlEvaluation(
                 url_id=candidate.url_id,
                 canonical_url=candidate.canonical_url,
+                start_url=candidate.start_url,
+                homepage_url=candidate.homepage_url,
                 domain=candidate.domain,
                 novelty=candidate.novelty,
                 render_profile=render_profile,
                 outcome=decision.outcome,
                 useful=decision.useful,
                 relevance_score=decision.relevance_score,
-                why_useful=decision.why_useful,
-                how_to_use=decision.how_to_use,
+                reasoning=decision.reasoning,
                 api_stage=decision.api_stage,
                 browser_delegated=browser_result is not None,
                 data_on_site=decision.outcome == "data_on_site",
@@ -410,6 +487,7 @@ class UrlEvaluator:
                 auth_required=any(item.auth_required for item in page_evidence) or bool(browser_result and browser_result.auth_required),
                 captcha_present=any(item.captcha_present for item in page_evidence) or bool(browser_result and browser_result.captcha_present),
                 evidence=page_evidence,
+                source_evidence=decision.source_evidence,
                 site_graph=graph.snapshot(max_nodes=min(self.config.max_site_graph_nodes, 60)),
                 visited_memory=visited_memory,
                 tool_duplicate_signal=tool_duplicate_signal,
@@ -432,13 +510,14 @@ class UrlEvaluator:
             evaluation = UrlEvaluation(
                 url_id=candidate.url_id,
                 canonical_url=candidate.canonical_url,
+                start_url=candidate.start_url,
+                homepage_url=candidate.homepage_url,
                 domain=candidate.domain,
                 novelty=candidate.novelty,
                 render_profile="hybrid",
                 outcome="unknown",
                 useful=False,
-                why_useful="Evaluation failed before the source could be fully assessed.",
-                how_to_use="Inspect the logged events and retry this URL.",
+                reasoning="Evaluation failed before the source could be fully assessed.",
                 notes=[f"evaluation_error:{type(exc).__name__}", _describe_exception(exc)],
             )
             self.telemetry.emit(
@@ -461,7 +540,7 @@ class UrlEvaluator:
             telemetry=self.telemetry,
             url_id=candidate.url_id,
             intent=intent,
-            seed_url=candidate.canonical_url,
+            seed_url=candidate.start_url,
             domain=candidate.domain,
         )
         cached = self._domain_bootstrap_cache.get(candidate.domain)
@@ -483,7 +562,7 @@ class UrlEvaluator:
             self._domain_bootstrap_cache[candidate.domain] = [
                 node.canonical_url
                 for node in cached_frontier
-                if node.canonical_url and node.canonical_url != candidate.canonical_url
+                if node.canonical_url and node.canonical_url != candidate.start_url
             ]
             self.telemetry.emit(
                 phase="site_graph",
@@ -496,7 +575,7 @@ class UrlEvaluator:
             )
 
         frontier = graph.next_frontier(limit=max(self.config.max_site_graph_frontier, self.config.max_internal_links))
-        links = [node.canonical_url for node in frontier if node.canonical_url and node.canonical_url != candidate.canonical_url]
+        links = [node.canonical_url for node in frontier if node.canonical_url and node.canonical_url != candidate.start_url]
         return graph, _unique_links(links)
 
     async def _plan_navigation_step(
@@ -506,7 +585,8 @@ class UrlEvaluator:
         candidate: UrlCandidate,
         graph: SiteGraph,
         initial_links: list[str],
-        page_evidence: list,
+        page_evidence: list[PageEvidence],
+        source_evidence: list[SourceEvidenceItem],
         visited_memory: list[NavigationMemoryEntry],
         previous_reasoning: str,
         node_context: dict[str, Any],
@@ -516,10 +596,14 @@ class UrlEvaluator:
         prompt = {
             "intent": intent,
             "candidate": {
-                "url": candidate.canonical_url,
+                "entry_url": candidate.canonical_url,
+                "start_url": candidate.start_url,
+                "homepage_url": candidate.homepage_url,
                 "domain": candidate.domain,
                 "title": candidate.source_title,
                 "snippet": candidate.source_snippet,
+                "start_mode": candidate.start_mode,
+                "content_kind_hint": candidate.content_kind_hint,
             },
             "step_no": step_no,
             "max_steps": max(1, self.config.max_site_graph_visits),
@@ -538,13 +622,16 @@ class UrlEvaluator:
                 {
                     "url": evidence.url,
                     "title": evidence.title,
+                    "content_kind": evidence.content_kind,
                     "api_detected": evidence.api_signal.detected,
                     "paywall": evidence.paywall_present,
                     "contact_sales": evidence.contact_sales_present,
                     "captcha": evidence.captcha_present,
+                    "data_signals": evidence.data_signals,
                 }
                 for evidence in page_evidence[-4:]
             ],
+            "source_evidence": [item.model_dump(mode="json") for item in source_evidence[-6:]],
             "temporary_node_context": node_context,
             "initial_links": initial_links[:40],
         }
@@ -556,10 +643,11 @@ class UrlEvaluator:
                     f"{prompt}\n\n"
                     "Rules:\n"
                     "- Allowed actions: fetch_url, read_node, delegate_browser, stop.\n"
-                    "- Use read_node when you need a long summary of one page node.\n"
+                    "- Use read_node when you need a longer summary from the site graph.\n"
                     "- Keep target_url in the same registrable domain as candidate when possible.\n"
                     "- Prefer fetch_url before delegate_browser unless JS interaction is likely necessary.\n"
                     "- If captcha is already present in signals, prefer stop or classify via final decision.\n"
+                    "- If a PDF already proved relevance, you can still fetch a portal/homepage page to discover a reusable recurring access surface.\n"
                     "- Return strict JSON only.\n"
                 ),
                 schema=_NavigationPlanEnvelope,
@@ -581,14 +669,28 @@ class UrlEvaluator:
                 error=type(exc).__name__,
             )
 
-    def _fallback_navigation_step(self, *, candidate: UrlCandidate, frontier: list, visited_memory: list[NavigationMemoryEntry], error: str) -> _NavigationPlanEnvelope:
+    def _fallback_navigation_step(
+        self,
+        *,
+        candidate: UrlCandidate,
+        frontier: list,
+        visited_memory: list[NavigationMemoryEntry],
+        error: str,
+    ) -> _NavigationPlanEnvelope:
         visited_urls = {entry.url for entry in visited_memory}
-        if candidate.canonical_url not in visited_urls:
+        if candidate.start_url not in visited_urls:
             return _NavigationPlanEnvelope(
-                reasoning=f"LLM plan fallback ({error}); fetch seed first.",
+                reasoning=f"LLM plan fallback ({error}); fetch start URL first.",
                 action="fetch_url",
-                target_url=candidate.canonical_url,
+                target_url=candidate.start_url,
             )
+        for preferred in (candidate.homepage_url, candidate.canonical_url):
+            if preferred and preferred not in visited_urls:
+                return _NavigationPlanEnvelope(
+                    reasoning=f"LLM plan fallback ({error}); fetch candidate surface.",
+                    action="fetch_url",
+                    target_url=preferred,
+                )
         for node in frontier:
             if node.canonical_url not in visited_urls:
                 return _NavigationPlanEnvelope(
@@ -612,13 +714,13 @@ class UrlEvaluator:
         graph: SiteGraph,
         allow_visited: bool,
     ) -> str:
-        candidate_url = candidate.canonical_url
         if not visited_urls:
-            return candidate_url
+            return candidate.start_url
 
         candidates: list[str] = []
         if target_url:
             candidates.append(target_url)
+        candidates.extend(url for url in (candidate.homepage_url, candidate.canonical_url) if url)
         candidates.extend(initial_links[: self.config.max_internal_links])
         candidates.extend(node.canonical_url for node in graph.next_frontier(limit=self.config.max_site_graph_frontier))
 
@@ -643,7 +745,8 @@ class UrlEvaluator:
         candidate: UrlCandidate,
         render_profile: str,
         initial_links: list[str],
-        page_evidence,
+        page_evidence: list[PageEvidence],
+        source_evidence: list[SourceEvidenceItem],
         browser_result,
         api_probe,
         visited_memory: list[NavigationMemoryEntry],
@@ -658,6 +761,8 @@ class UrlEvaluator:
                 {
                     "url": evidence.url,
                     "title": evidence.title,
+                    "content_type": evidence.content_type,
+                    "content_kind": evidence.content_kind,
                     "text_excerpt": evidence.text_excerpt[:500],
                     "api_signal": evidence.api_signal.model_dump(mode="json"),
                     "paywall_present": evidence.paywall_present,
@@ -665,42 +770,48 @@ class UrlEvaluator:
                     "auth_required": evidence.auth_required,
                     "captcha_present": evidence.captcha_present,
                     "data_signals": evidence.data_signals,
+                    "relevant_links": evidence.relevant_links[:12],
                 }
                 for evidence in page_evidence
             ],
+            "source_evidence": [item.model_dump(mode="json") for item in source_evidence],
             "browser_result": browser_result.model_dump(mode="json") if browser_result else None,
             "api_probe": api_probe.model_dump(mode="json") if api_probe else None,
         }
         response = await self.llm.complete_json(
             system_prompt=DECISION_SYSTEM_PROMPT,
             user_prompt=(
-                "Decide whether this website is a useful datasource for the intent.\n\n"
+                "Decide whether this domain/source is a useful datasource for the intent.\n\n"
                 f"{prompt}\n\n"
                 "Rules:\n"
-                "- Use only visited_pages, browser_result, and api_probe as evidence.\n"
-                "- `data_on_site` when valuable data appears directly on the site or portal.\n"
+                "- Use only visited_pages, source_evidence, browser_result, and api_probe as evidence.\n"
+                "- `data_on_site` when valuable data appears directly on the site, files, portal, or listings.\n"
                 "- `api_available` when API/docs/endpoints are present and seem workable.\n"
                 "- `contact_sales_only` when only sales/demo access exists.\n"
                 "- `paywall` when payment/upgrade is required for access.\n"
                 "- `irrelevant` when it does not materially help the intent.\n"
                 "- Novelty matters, but a non-novel source can still be useful.\n"
+                "- `reasoning` must explain both why the source is correct and the rough recurring access path on this domain.\n"
                 "- Return JSON with EXACT keys:\n"
                 "  useful (boolean), relevance_score (0..1 float), outcome,\n"
-                "  why_useful, how_to_use, api_stage, notes (list).\n"
+                "  reasoning, api_stage, source_evidence (list), notes (list).\n"
                 "- Be strict. Return only JSON.\n"
             ),
             schema=_DecisionRawEnvelope,
             temperature=0.0,
-            max_completion_tokens=2048,
+            max_completion_tokens=2200,
         )
-        return _normalize_decision_response(response)
+        return _normalize_decision_response(
+            response,
+            inferred_source_evidence=_infer_source_evidence(page_evidence, browser_result, source_evidence, api_probe),
+        )
 
     async def _assess_tool_duplicate(
         self,
         *,
         intent: str,
         candidate: UrlCandidate,
-        page_evidence: list,
+        page_evidence: list[PageEvidence],
         decision: EvaluationDecision,
     ) -> ToolDuplicateSignal:
         if self.tool_inventory is None or not self.tool_inventory.tool_names:
@@ -712,20 +823,20 @@ class UrlEvaluator:
                 "domain": candidate.domain,
                 "title": candidate.source_title,
                 "snippet": candidate.source_snippet,
-                "canonical_url": candidate.canonical_url,
+                "entry_url": candidate.canonical_url,
             },
             "evidence": [
                 {
                     "url": item.url,
                     "title": item.title,
+                    "content_kind": item.content_kind,
                     "data_signals": item.data_signals,
                 }
                 for item in page_evidence[:4]
             ],
             "decision": {
                 "outcome": decision.outcome,
-                "why_useful": decision.why_useful,
-                "how_to_use": decision.how_to_use,
+                "reasoning": decision.reasoning,
             },
         }
         try:
@@ -745,7 +856,6 @@ class UrlEvaluator:
             terms = response.terms[:8]
             reason = response.reason.strip()
         except Exception as exc:
-            # Keep fallback deterministic when the LLM extraction call fails.
             terms = [candidate.domain, candidate.source_title]
             reason = f"fallback:{type(exc).__name__}"
 
@@ -769,7 +879,7 @@ class UrlEvaluator:
         )
         return signal
 
-    def _merge_api_signal(self, page_evidence: list, browser_result) -> ApiSignal:
+    def _merge_api_signal(self, page_evidence: list[PageEvidence], browser_result) -> ApiSignal:
         merged = ApiSignal()
         for evidence in page_evidence:
             merged.detected = merged.detected or evidence.api_signal.detected
@@ -792,9 +902,9 @@ class UrlEvaluator:
         return merged
 
 
-def _one_line_page_summary(evidence) -> str:
+def _one_line_page_summary(evidence: PageEvidence) -> str:
     title = evidence.title.strip() if evidence.title else ""
-    bits = []
+    bits = [evidence.content_kind]
     if evidence.api_signal.detected:
         bits.append("api")
     if evidence.contact_sales_present:
@@ -810,8 +920,14 @@ def _one_line_page_summary(evidence) -> str:
     return f"{base}{signal}"[:220]
 
 
+def _one_line_pdf_summary(result) -> str:
+    verdict = "pdf-match" if result.relevant else "pdf-nonmatch"
+    base = result.title.strip() or result.url
+    return f"{base} [{verdict}]"[:220]
+
+
 def _one_line_browser_summary(result) -> str:
-    reason = (result.why_useful or result.how_to_use or "browser delegation completed").strip()
+    reason = (result.reasoning or "browser delegation completed").strip()
     return f"{result.classification}: {reason}"[:220]
 
 
@@ -826,15 +942,18 @@ def _unique_links(links: list[str]) -> list[str]:
     return unique
 
 
-def _normalize_decision_response(response: _DecisionRawEnvelope) -> EvaluationDecision:
+def _normalize_decision_response(
+    response: _DecisionRawEnvelope,
+    *,
+    inferred_source_evidence: list[SourceEvidenceItem],
+) -> EvaluationDecision:
     notes = _normalize_notes(response.notes)
     standard_fields_present = all(
         [
             response.useful is not None,
             response.relevance_score is not None,
             bool((response.outcome or "").strip()),
-            bool((response.why_useful or "").strip()),
-            bool((response.how_to_use or "").strip()),
+            bool((response.reasoning or "").strip()),
             bool((response.api_stage or "").strip()),
         ]
     )
@@ -844,26 +963,25 @@ def _normalize_decision_response(response: _DecisionRawEnvelope) -> EvaluationDe
     outcome = _normalize_outcome(response)
     useful = _normalize_useful(response, outcome=outcome)
     relevance_score = _normalize_score(response, useful=useful, outcome=outcome)
-    why_useful = (
-        (response.why_useful or "").strip()
-        or (response.evidence or "").strip()
+    reasoning = (
+        (response.reasoning or "").strip()
+        or (response.why_useful or "").strip()
+        or (
+            f"{(response.evidence or '').strip()} {(response.how_to_use or response.recommendation or '').strip()}".strip()
+        )
         or (response.reason or "").strip()
         or ("Relevant signals were found for this intent." if useful else "Insufficient evidence of intent relevance.")
     )
-    how_to_use = (
-        (response.how_to_use or "").strip()
-        or (response.recommendation or "").strip()
-        or _default_how_to_use(outcome=outcome, useful=useful)
-    )
     api_stage = _normalize_api_stage(response, outcome=outcome)
+    source_evidence = _normalize_source_evidence(response.source_evidence) or inferred_source_evidence
 
     return EvaluationDecision(
         useful=useful,
         relevance_score=relevance_score,
         outcome=outcome,
-        why_useful=why_useful,
-        how_to_use=how_to_use,
+        reasoning=reasoning,
         api_stage=api_stage,
+        source_evidence=source_evidence,
         notes=notes,
     )
 
@@ -941,6 +1059,18 @@ def _normalize_api_stage(response: _DecisionRawEnvelope, *, outcome: str) -> str
     return "none"
 
 
+def _normalize_source_evidence(raw: Any) -> list[SourceEvidenceItem]:
+    if not isinstance(raw, list):
+        return []
+    items: list[SourceEvidenceItem] = []
+    for value in raw:
+        try:
+            items.append(SourceEvidenceItem.model_validate(value))
+        except Exception:
+            continue
+    return items
+
+
 def _coerce_bool(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -963,15 +1093,49 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
-def _default_how_to_use(*, outcome: str, useful: bool) -> str:
-    if not useful:
-        return "Skip this source for now."
-    return {
-        "data_on_site": "Use page scraping or feed export where available.",
-        "api_available": "Use documented API endpoints with auth/rate-limit handling.",
-        "contact_sales_only": "Store for human follow-up and access evaluation.",
-        "paywall": "Store for human review and paid-access decision.",
-    }.get(outcome, "Store this source for manual follow-up.")
+def _infer_source_evidence(
+    page_evidence: list[PageEvidence],
+    browser_result,
+    source_evidence: list[SourceEvidenceItem],
+    api_probe,
+) -> list[SourceEvidenceItem]:
+    inferred = list(source_evidence)
+    for item in page_evidence:
+        if item.content_kind == "pdf":
+            inferred.append(SourceEvidenceItem(kind="pdf", url=item.url, title=item.title, summary=item.text_excerpt[:800]))
+        elif item.api_signal.detected:
+            inferred.append(SourceEvidenceItem(kind="api", url=item.url, title=item.title, summary=item.text_excerpt[:800]))
+        elif item.contact_sales_present:
+            inferred.append(SourceEvidenceItem(kind="contact_sales", url=item.url, title=item.title, summary=item.text_excerpt[:800]))
+        elif item.paywall_present:
+            inferred.append(SourceEvidenceItem(kind="paywall", url=item.url, title=item.title, summary=item.text_excerpt[:800]))
+        elif item.data_signals:
+            inferred.append(SourceEvidenceItem(kind="page", url=item.url, title=item.title, summary=item.text_excerpt[:800]))
+    if api_probe and api_probe.url:
+        inferred.append(
+            SourceEvidenceItem(
+                kind="api",
+                url=api_probe.url,
+                summary=(api_probe.response_excerpt or api_probe.planner_reason or "API probe attempted.")[:800],
+            )
+        )
+    if browser_result and browser_result.source_evidence:
+        inferred.extend(browser_result.source_evidence)
+    return _merge_source_evidence([], inferred)
+
+
+def _merge_source_evidence(existing: list[SourceEvidenceItem], incoming: list[SourceEvidenceItem]) -> list[SourceEvidenceItem]:
+    merged: list[SourceEvidenceItem] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in [*existing, *incoming]:
+        if not item.url and not item.summary:
+            continue
+        key = (item.kind, item.url.strip(), item.summary.strip()[:120])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
 
 
 def _describe_exception(exc: Exception) -> str:

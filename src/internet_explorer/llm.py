@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 from typing import Any, TypeVar
@@ -39,6 +40,52 @@ class LLMClient:
         payload = {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_completion_tokens,
+                "responseMimeType": "application/json",
+            },
+        }
+        text = await self._call_gemini(payload=payload)
+        parsed = _extract_json_payload(text)
+        parsed = _normalize_payload_for_schema(parsed, schema=schema)
+        return schema.model_validate(parsed)
+
+    async def complete_pdf_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        pdf_bytes: bytes,
+        schema: type[T],
+        temperature: float = 0.1,
+        max_completion_tokens: int = 4096,
+    ) -> T:
+        if not self.api_keys:
+            raise ValueError("GEMINI_API_KEY or GEMINI_API_KEYS is required for LLM requests.")
+        if not pdf_bytes:
+            raise ValueError("pdf_bytes is required")
+        if len(pdf_bytes) > self.config.pdf_inline_max_bytes:
+            raise ValueError(
+                f"pdf_too_large_for_inline_gemini:{len(pdf_bytes)}>{self.config.pdf_inline_max_bytes}"
+            )
+
+        payload = {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": user_prompt},
+                        {
+                            "inlineData": {
+                                "mimeType": "application/pdf",
+                                "data": base64.b64encode(pdf_bytes).decode("ascii"),
+                            }
+                        },
+                    ],
+                }
+            ],
             "generationConfig": {
                 "temperature": temperature,
                 "maxOutputTokens": max_completion_tokens,

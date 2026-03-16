@@ -307,12 +307,11 @@ class SiteGraph:
             node.page_type_guess = self._infer_page_type(
                 node.canonical_url,
                 node.title,
-                f"{result.why_useful} {result.how_to_use}",
+                result.reasoning,
                 node.signals,
                 preferred=_page_type_from_browser_classification(result.classification),
             )
-            summary_bits = [result.why_useful.strip(), result.how_to_use.strip()]
-            node.summary = " ".join(bit for bit in summary_bits if bit).strip() or node.summary
+            node.summary = result.reasoning.strip() or node.summary
             node.priority_score = self._score_node(node)
         if result.relevant_links:
             self.add_links(url, result.relevant_links, discovered_via="browser_click")

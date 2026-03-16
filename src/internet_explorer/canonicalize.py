@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+import tldextract
+
 
 TRACKING_QUERY_PARAMS = {
     "utm_source",
@@ -18,15 +20,7 @@ TRACKING_QUERY_PARAMS = {
     "mc_eid",
 }
 
-COMMON_SECOND_LEVEL_SUFFIXES = {
-    "co.uk",
-    "org.uk",
-    "gov.uk",
-    "ac.uk",
-    "co.in",
-    "com.au",
-    "co.jp",
-}
+_TLD_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=None)
 
 
 def canonicalize_url(raw_url: str) -> str:
@@ -61,26 +55,27 @@ def canonical_domain(url_or_domain: str) -> str:
 
 def registrable_domain(url_or_domain: str) -> str:
     domain = canonical_domain(url_or_domain)
-    parts = [part for part in domain.split(".") if part]
-    if len(parts) <= 2:
-        return domain
-    last_two = ".".join(parts[-2:])
-    last_three = ".".join(parts[-3:])
-    if last_two in COMMON_SECOND_LEVEL_SUFFIXES:
-        return ".".join(parts[-3:])
-    if last_three in COMMON_SECOND_LEVEL_SUFFIXES and len(parts) >= 4:
-        return ".".join(parts[-4:])
-    return ".".join(parts[-2:])
+    if not domain:
+        return ""
+    extracted = _TLD_EXTRACTOR(domain)
+    registered = extracted.top_domain_under_public_suffix
+    return registered.lower() if registered else domain
+
+
+def homepage_url_for_domain(domain: str, *, scheme: str = "https") -> str:
+    cleaned = registrable_domain(domain)
+    if not cleaned:
+        return ""
+    return f"{scheme.lower()}://{cleaned}/"
 
 
 def load_baseline_domains(path: Path) -> set[str]:
     if not path.exists():
         return set()
     domains: set[str] = set()
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         domains.add(registrable_domain(stripped))
     return domains
-

@@ -84,7 +84,7 @@ class _History:
     def final_result(self):
         return (
             '{"classification":"api_available","useful":true,'
-            '"why_useful":"API docs found","how_to_use":"Use docs and openapi",'
+            '"reasoning":"API docs found and the domain can be queried through documented OpenAPI endpoints.",'
             '"api_detected":true,"api_accessible_guess":true,'
             '"relevant_links":["https://example.com/openapi.json"],"confidence":0.92}'
         )
@@ -153,6 +153,7 @@ def test_browser_delegate_uses_planner_and_native_browser_use(monkeypatch, tmp_p
 
     assert result.classification == "api_available"
     assert result.useful is True
+    assert "OpenAPI" in result.reasoning or "openapi" in result.reasoning.lower()
     assert result.api_detected is True
     assert result.api_accessible_guess is True
     assert "https://example.com/openapi.json" in result.relevant_links

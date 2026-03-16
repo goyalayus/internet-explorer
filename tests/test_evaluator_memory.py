@@ -52,8 +52,7 @@ class _LLMStub:
             "useful": True,
             "relevance_score": 0.84,
             "outcome": "data_on_site",
-            "why_useful": "Contains visible RFP listings.",
-            "how_to_use": "Scrape listing pages directly.",
+            "reasoning": "Contains visible RFP listings and can be scraped from listing pages directly.",
             "api_stage": "none",
             "notes": [],
         }
@@ -157,6 +156,24 @@ def _responses_with_fetch_failures() -> dict[str, FetchResult | Exception]:
     }
 
 
+def _candidate(url_id: str, *, title: str = "Example") -> UrlCandidate:
+    return UrlCandidate(
+        url_id=url_id,
+        strategy_id=f"strat_{url_id}",
+        query_id=f"qry_{url_id}",
+        raw_url="https://example.com/",
+        canonical_url="https://example.com/",
+        start_url="https://example.com/",
+        homepage_url="https://example.com/",
+        domain="example.com",
+        novelty=True,
+        source_title=title,
+        source_snippet="",
+        serp_rank=1,
+        serp_page=1,
+    )
+
+
 @pytest.mark.asyncio
 async def test_evaluator_keeps_one_line_visited_memory(tmp_path: Path) -> None:
     config = _config(tmp_path)
@@ -168,19 +185,7 @@ async def test_evaluator_keeps_one_line_visited_memory(tmp_path: Path) -> None:
         _BrowserManagerStub(),
         tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
     )
-    candidate = UrlCandidate(
-        url_id="url_1",
-        strategy_id="strat_1",
-        query_id="qry_1",
-        raw_url="https://example.com/",
-        canonical_url="https://example.com/",
-        domain="example.com",
-        novelty=True,
-        source_title="Example",
-        source_snippet="",
-        serp_rank=1,
-        serp_page=1,
-    )
+    candidate = _candidate("url_1")
 
     evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
 
@@ -205,19 +210,7 @@ async def test_evaluator_marks_duplicate_tool_sources(tmp_path: Path) -> None:
         _BrowserManagerStub(),
         tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
     )
-    candidate = UrlCandidate(
-        url_id="url_2",
-        strategy_id="strat_2",
-        query_id="qry_2",
-        raw_url="https://example.com/",
-        canonical_url="https://example.com/",
-        domain="example.com",
-        novelty=True,
-        source_title="Core Signal Style Source",
-        source_snippet="",
-        serp_rank=1,
-        serp_page=1,
-    )
+    candidate = _candidate("url_2", title="Core Signal Style Source")
 
     evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
 
@@ -244,19 +237,7 @@ async def test_evaluator_normalizes_verdict_shape(tmp_path: Path) -> None:
         _BrowserManagerStub(),
         tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
     )
-    candidate = UrlCandidate(
-        url_id="url_3",
-        strategy_id="strat_3",
-        query_id="qry_3",
-        raw_url="https://example.com/",
-        canonical_url="https://example.com/",
-        domain="example.com",
-        novelty=True,
-        source_title="Example",
-        source_snippet="",
-        serp_rank=1,
-        serp_page=1,
-    )
+    candidate = _candidate("url_3")
 
     evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
 
@@ -284,19 +265,7 @@ async def test_evaluator_normalizes_category_reason_shape(tmp_path: Path) -> Non
         _BrowserManagerStub(),
         tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
     )
-    candidate = UrlCandidate(
-        url_id="url_4",
-        strategy_id="strat_4",
-        query_id="qry_4",
-        raw_url="https://example.com/",
-        canonical_url="https://example.com/",
-        domain="example.com",
-        novelty=True,
-        source_title="Example",
-        source_snippet="",
-        serp_rank=1,
-        serp_page=1,
-    )
+    candidate = _candidate("url_4")
 
     evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
 
@@ -317,19 +286,7 @@ async def test_evaluator_marks_unknown_when_all_fetches_fail(tmp_path: Path) -> 
         _BrowserManagerStub(),
         tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
     )
-    candidate = UrlCandidate(
-        url_id="url_5",
-        strategy_id="strat_5",
-        query_id="qry_5",
-        raw_url="https://example.com/",
-        canonical_url="https://example.com/",
-        domain="example.com",
-        novelty=True,
-        source_title="Example",
-        source_snippet="",
-        serp_rank=1,
-        serp_page=1,
-    )
+    candidate = _candidate("url_5")
 
     evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
 

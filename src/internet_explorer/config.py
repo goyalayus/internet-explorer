@@ -50,6 +50,7 @@ class AppConfig(BaseModel):
     temp_signup_password: str = ""
     baseline_domains_file: Path
     known_tools_file: Path
+    candidate_start_mode: str = "domain_homepage"
     max_browser_concurrency: int = 0
     browser_delegate_timeout_seconds: int = 180
     max_url_concurrency: int = 0
@@ -75,6 +76,7 @@ class AppConfig(BaseModel):
     max_sitemap_urls: int = 150
     max_sitemap_fetches: int = 6
     request_timeout_seconds: int = 20
+    pdf_inline_max_bytes: int = 8_000_000
     http_pool_timeout_seconds: int = 30
     http_max_connections: int = 300
     http_max_keepalive_connections: int = 100
@@ -171,6 +173,7 @@ class AppConfig(BaseModel):
             temp_signup_password=env_value("TEMP_SIGNUP_PASSWORD"),
             baseline_domains_file=Path(env_value("BASELINE_DOMAINS_FILE", str(root_dir / "data/tool_flow_baseline_domains.txt"))),
             known_tools_file=Path(env_value("KNOWN_TOOLS_FILE", str(root_dir / "data/known_tools.txt"))),
+            candidate_start_mode=env_value("CANDIDATE_START_MODE", "domain_homepage"),
             max_browser_concurrency=int(env_value("MAX_BROWSER_CONCURRENCY", "0")),
             browser_delegate_timeout_seconds=int(env_value("BROWSER_DELEGATE_TIMEOUT_SECONDS", "180")),
             max_url_concurrency=int(env_value("MAX_URL_CONCURRENCY", "0")),
@@ -196,6 +199,7 @@ class AppConfig(BaseModel):
             max_sitemap_urls=int(env_value("MAX_SITEMAP_URLS", "150")),
             max_sitemap_fetches=int(env_value("MAX_SITEMAP_FETCHES", "6")),
             request_timeout_seconds=int(env_value("REQUEST_TIMEOUT_SECONDS", "20")),
+            pdf_inline_max_bytes=int(env_value("PDF_INLINE_MAX_BYTES", "8000000")),
             http_pool_timeout_seconds=int(env_value("HTTP_POOL_TIMEOUT_SECONDS", "30")),
             http_max_connections=int(env_value("HTTP_MAX_CONNECTIONS", "300")),
             http_max_keepalive_connections=int(env_value("HTTP_MAX_KEEPALIVE_CONNECTIONS", "100")),

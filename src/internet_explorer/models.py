@@ -14,9 +14,11 @@ OutcomeType = Literal[
     "irrelevant",
     "unknown",
 ]
-
 RenderProfile = Literal["static_ssr", "hybrid", "csr_shell"]
 SiteNodeStatus = Literal["unvisited", "fetched", "analyzed", "delegated_browser", "failed"]
+CandidateStartMode = Literal["domain_homepage", "first_result_url"]
+CandidateContentKind = Literal["html_page", "pdf", "binary_file", "unknown"]
+EvidenceKind = Literal["page", "pdf", "api", "dataset", "contact_sales", "paywall", "browser_finding", "file"]
 
 
 class Strategy(BaseModel):
@@ -47,12 +49,16 @@ class UrlCandidate(BaseModel):
     query_id: str
     raw_url: str
     canonical_url: str
+    start_url: str
+    homepage_url: str
     domain: str
     novelty: bool
+    start_mode: CandidateStartMode = "domain_homepage"
     source_title: str = ""
     source_snippet: str = ""
     serp_rank: int
     serp_page: int
+    content_kind_hint: CandidateContentKind = "unknown"
 
 
 class FetchResult(BaseModel):
@@ -60,9 +66,23 @@ class FetchResult(BaseModel):
     final_url: str
     status_code: int | None = None
     content_type: str = ""
+    content_disposition: str = ""
+    content_length: int = 0
+    is_binary: bool = False
     html: str = ""
     body_text: str = ""
     text_excerpt: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class BinaryFetchResult(BaseModel):
+    url: str
+    final_url: str
+    status_code: int | None = None
+    content_type: str = ""
+    content_disposition: str = ""
+    content_length: int = 0
+    content_bytes: bytes = b""
     headers: dict[str, str] = Field(default_factory=dict)
 
 
@@ -94,6 +114,8 @@ class ApiProbeResult(BaseModel):
 class PageEvidence(BaseModel):
     url: str
     title: str = ""
+    content_type: str = ""
+    content_kind: CandidateContentKind = "html_page"
     text_excerpt: str = ""
     html_excerpt: str = ""
     relevant_links: list[str] = Field(default_factory=list)
@@ -103,6 +125,28 @@ class PageEvidence(BaseModel):
     auth_required: bool = False
     captcha_present: bool = False
     data_signals: list[str] = Field(default_factory=list)
+
+
+class SourceEvidenceItem(BaseModel):
+    kind: EvidenceKind
+    url: str
+    title: str = ""
+    summary: str = ""
+
+
+class PdfVerificationResult(BaseModel):
+    url: str
+    final_url: str = ""
+    title: str = ""
+    status_code: int | None = None
+    content_type: str = "application/pdf"
+    relevant: bool = False
+    reasoning: str = ""
+    summary: str = ""
+    extracted_signals: list[str] = Field(default_factory=list)
+    fallback_urls: list[str] = Field(default_factory=list)
+    source_evidence: SourceEvidenceItem | None = None
+    error: str = ""
 
 
 class BrowserStep(BaseModel):
@@ -116,8 +160,7 @@ class BrowserDelegateResult(BaseModel):
     session_name: str
     classification: OutcomeType = "unknown"
     useful: bool = False
-    why_useful: str = ""
-    how_to_use: str = ""
+    reasoning: str = ""
     render_path: str = ""
     data_on_site: bool = False
     api_detected: bool = False
@@ -128,6 +171,7 @@ class BrowserDelegateResult(BaseModel):
     captcha_present: bool = False
     relevant_links: list[str] = Field(default_factory=list)
     evidence_snippets: list[str] = Field(default_factory=list)
+    source_evidence: list[SourceEvidenceItem] = Field(default_factory=list)
     recipe: list[BrowserStep] = Field(default_factory=list)
     confidence: float = 0.0
     raw_output: dict[str, Any] = Field(default_factory=dict)
@@ -180,14 +224,15 @@ class ToolDuplicateSignal(BaseModel):
 class UrlEvaluation(BaseModel):
     url_id: str
     canonical_url: str
+    start_url: str = ""
+    homepage_url: str = ""
     domain: str
     novelty: bool
     render_profile: RenderProfile
     outcome: OutcomeType
     useful: bool
     relevance_score: float = 0.0
-    why_useful: str = ""
-    how_to_use: str = ""
+    reasoning: str = ""
     api_stage: Literal["none", "api_detected", "api_accessible", "api_relevant", "api_viable"] = "none"
     browser_delegated: bool = False
     data_on_site: bool = False
@@ -198,6 +243,7 @@ class UrlEvaluation(BaseModel):
     auth_required: bool = False
     captcha_present: bool = False
     evidence: list[PageEvidence] = Field(default_factory=list)
+    source_evidence: list[SourceEvidenceItem] = Field(default_factory=list)
     site_graph: SiteGraphSnapshot | None = None
     visited_memory: list[NavigationMemoryEntry] = Field(default_factory=list)
     tool_duplicate_signal: ToolDuplicateSignal = Field(default_factory=ToolDuplicateSignal)
@@ -216,6 +262,9 @@ class RunSummary(BaseModel):
     unique_url_count: int = 0
     evaluated_url_count: int = 0
     useful_url_count: int = 0
+    unique_source_count: int = 0
+    evaluated_source_count: int = 0
+    useful_source_count: int = 0
     browser_peak_active: int = 0
     status: Literal["running", "completed", "failed"] = "running"
     error: str | None = None
@@ -233,7 +282,7 @@ class EvaluationDecision(BaseModel):
     useful: bool
     relevance_score: float
     outcome: OutcomeType
-    why_useful: str
-    how_to_use: str
+    reasoning: str
     api_stage: Literal["none", "api_detected", "api_accessible", "api_relevant", "api_viable"]
+    source_evidence: list[SourceEvidenceItem] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

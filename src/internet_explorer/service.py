@@ -5,12 +5,13 @@ import uuid
 from datetime import datetime
 
 from internet_explorer.browser_delegate import BrowserDelegationManager
-from internet_explorer.canonicalize import canonicalize_url, load_baseline_domains, registrable_domain
+from internet_explorer.canonicalize import canonicalize_url, homepage_url_for_domain, load_baseline_domains, registrable_domain
 from internet_explorer.config import AppConfig
 from internet_explorer.evaluator import UrlEvaluator
 from internet_explorer.fetcher import AsyncWebFetcher
 from internet_explorer.llm import LLMClient
 from internet_explorer.models import RunSummary, UrlCandidate
+from internet_explorer.pdf_verify import PdfVerifierService
 from internet_explorer.persistence import MongoPersistence
 from internet_explorer.search import GoogleSearchCollector
 from internet_explorer.strategy import StrategyPlanner
@@ -57,7 +58,13 @@ class IntentDiscoveryService:
         planner = StrategyPlanner(self.config, self.llm, telemetry)
         searcher = GoogleSearchCollector(self.config, telemetry)
         fetcher = AsyncWebFetcher(self.config)
-        browser_manager = BrowserDelegationManager(self.config, telemetry, lambda fields: self.persistence.update_run(run_id, fields))
+        pdf_verifier = PdfVerifierService(fetcher, self.llm, telemetry)
+        browser_manager = BrowserDelegationManager(
+            self.config,
+            telemetry,
+            lambda fields: self.persistence.update_run(run_id, fields),
+            pdf_verifier=pdf_verifier,
+        )
         evaluator = UrlEvaluator(
             self.config,
             self.llm,
@@ -108,14 +115,21 @@ class IntentDiscoveryService:
 
             deduped_candidates = self._dedupe_results(raw_results, baseline_domains, telemetry)
             summary.unique_url_count = len(deduped_candidates)
+            summary.unique_source_count = len(deduped_candidates)
             self.persistence.update_run(
                 run_id,
-                {"raw_result_count": summary.raw_result_count, "unique_url_count": summary.unique_url_count},
+                {
+                    "raw_result_count": summary.raw_result_count,
+                    "unique_url_count": summary.unique_url_count,
+                    "unique_source_count": summary.unique_source_count,
+                },
             )
 
             evaluations = await self._evaluate_candidates(intent, deduped_candidates, evaluator, telemetry)
             summary.evaluated_url_count = len(evaluations)
             summary.useful_url_count = sum(1 for evaluation in evaluations if evaluation.useful)
+            summary.evaluated_source_count = summary.evaluated_url_count
+            summary.useful_source_count = summary.useful_url_count
             summary.browser_peak_active = browser_manager.peak
             summary.finished_at = datetime.utcnow()
             summary.status = "completed"
@@ -172,20 +186,26 @@ class IntentDiscoveryService:
         for result in raw_results:
             canonical_url = canonicalize_url(result.url)
             domain = registrable_domain(canonical_url)
-            if canonical_url in deduped:
+            if not domain or domain in deduped:
                 continue
-            deduped[canonical_url] = UrlCandidate(
+            homepage_url = homepage_url_for_domain(domain)
+            start_url = homepage_url if self.config.candidate_start_mode == "domain_homepage" else canonical_url
+            deduped[domain] = UrlCandidate(
                 url_id=f"url_{uuid.uuid4().hex[:10]}",
                 strategy_id=result.strategy_id,
                 query_id=result.query_id,
                 raw_url=result.url,
                 canonical_url=canonical_url,
+                start_url=start_url,
+                homepage_url=homepage_url,
                 domain=domain,
                 novelty=domain not in baseline_domains,
+                start_mode=self.config.candidate_start_mode,  # type: ignore[arg-type]
                 source_title=result.title,
                 source_snippet=result.snippet,
                 serp_rank=result.rank,
                 serp_page=result.serp_page,
+                content_kind_hint=_guess_content_kind(canonical_url),
             )
         candidates = list(deduped.values())
         telemetry.emit(
@@ -193,8 +213,8 @@ class IntentDiscoveryService:
             actor="system",
             input_payload={"raw_results": len(raw_results)},
             output_summary=[candidate.model_dump() for candidate in candidates[:50]],
-            decision=f"deduped_to_{len(candidates)}",
-            extra={"deduped_total": len(candidates)},
+            decision=f"deduped_domains_to_{len(candidates)}",
+            extra={"deduped_total": len(candidates), "dedupe_key": "registrable_domain"},
         )
         return candidates
 
@@ -246,3 +266,10 @@ class IntentDiscoveryService:
                 decision="batch_done",
             )
         return all_results
+
+
+def _guess_content_kind(url: str) -> str:
+    lowered = url.lower()
+    if lowered.endswith(".pdf") or ".pdf?" in lowered:
+        return "pdf"
+    return "html_page"

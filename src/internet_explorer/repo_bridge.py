@@ -39,6 +39,9 @@ def load_eu_swarm_modules(config: AppConfig) -> dict[str, object]:
     os.environ["AZURE_OPENAI_ENDPOINT"] = config.azure_openai_endpoint
     os.environ["AZURE_OPENAI_API_VERSION"] = config.azure_openai_api_version
     os.environ["AZURE_OPENAI_DEPLOYMENT"] = config.azure_openai_model
+    if config.gemini_api_key:
+        os.environ["GEMINI_API_KEY"] = config.gemini_api_key
+        os.environ.setdefault("GOOGLE_API_KEY", config.gemini_api_key)
 
     paths: list[Path] = []
     if config.eu_swarm_path is not None:
@@ -75,6 +78,8 @@ def _import_modules() -> dict[str, Any]:
         "SmartScraperPlan": smart_scraper_plan,
         "BrowserUseAgent": importlib.import_module("browser_use").Agent,
         "BrowserUseBrowser": importlib.import_module("browser_use").Browser,
+        "BrowserUseTools": importlib.import_module("browser_use").Tools,
+        "BrowserUseActionResult": importlib.import_module("browser_use").ActionResult,
         "get_browser_use_llm_by_name": importlib.import_module("browser_use.llm.models").get_llm_by_name,
     }
 

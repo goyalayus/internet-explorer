@@ -9,7 +9,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from internet_explorer.config import AppConfig
-from internet_explorer.models import ApiSignal, FetchResult, PageEvidence, RenderProfile
+from internet_explorer.models import ApiSignal, BinaryFetchResult, FetchResult, PageEvidence, RenderProfile
 
 
 API_LINK_KEYWORDS = ("api", "developer", "docs", "openapi", "swagger", "graphql", "reference")
@@ -97,14 +97,19 @@ class AsyncWebFetcher:
             try:
                 response = await self.client.get(url)
                 content_type = response.headers.get("content-type", "")
-                body_text = response.text
-                html = response.text if "html" in content_type or not content_type else ""
+                content_disposition = response.headers.get("content-disposition", "")
+                is_binary = not _is_textual_content_type(content_type)
+                body_text = response.text if not is_binary else ""
+                html = body_text if ("html" in content_type or (not content_type and not is_binary)) else ""
                 text = _html_to_text(html)[:4000] if html else body_text[:4000]
                 return FetchResult(
                     url=url,
                     final_url=str(response.url),
                     status_code=response.status_code,
                     content_type=content_type,
+                    content_disposition=content_disposition,
+                    content_length=len(response.content),
+                    is_binary=is_binary,
                     html=html,
                     body_text=body_text,
                     text_excerpt=text,
@@ -119,6 +124,32 @@ class AsyncWebFetcher:
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("fetch failed without a captured exception")
+
+    async def fetch_binary(self, url: str) -> BinaryFetchResult:
+        attempts = max(1, self.config.fetch_retry_attempts)
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = await self.client.get(url)
+                return BinaryFetchResult(
+                    url=url,
+                    final_url=str(response.url),
+                    status_code=response.status_code,
+                    content_type=response.headers.get("content-type", ""),
+                    content_disposition=response.headers.get("content-disposition", ""),
+                    content_length=len(response.content),
+                    content_bytes=response.content,
+                    headers=dict(response.headers),
+                )
+            except TRANSIENT_FETCH_ERRORS as exc:
+                last_exc = exc
+                if attempt >= attempts:
+                    break
+                backoff = self.config.fetch_retry_base_backoff_seconds * (2 ** (attempt - 1))
+                await asyncio.sleep(min(backoff, 8.0))
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("binary fetch failed without a captured exception")
 
     async def close(self) -> None:
         await self.client.aclose()
@@ -190,6 +221,8 @@ def analyze_page(fetch: FetchResult) -> PageEvidence:
     return PageEvidence(
         url=fetch.final_url,
         title=title,
+        content_type=fetch.content_type,
+        content_kind="html_page",
         text_excerpt=fetch.text_excerpt[:1200],
         html_excerpt=fetch.html[:2000],
         relevant_links=links,
@@ -216,3 +249,28 @@ def _html_to_text(html: str) -> str:
     for node in soup(["script", "style", "noscript"]):
         node.extract()
     return " ".join(soup.get_text(" ", strip=True).split())
+
+
+def is_probable_pdf_url(url: str) -> bool:
+    lowered = url.lower()
+    return lowered.endswith(".pdf") or ".pdf?" in lowered
+
+
+def is_pdf_fetch(fetch: FetchResult) -> bool:
+    content_type = fetch.content_type.lower()
+    disposition = fetch.content_disposition.lower()
+    return "application/pdf" in content_type or ".pdf" in disposition or is_probable_pdf_url(fetch.final_url)
+
+
+def _is_textual_content_type(content_type: str) -> bool:
+    lowered = content_type.lower()
+    if not lowered:
+        return True
+    return (
+        "text/" in lowered
+        or "html" in lowered
+        or "json" in lowered
+        or "xml" in lowered
+        or "javascript" in lowered
+        or "x-www-form-urlencoded" in lowered
+    )

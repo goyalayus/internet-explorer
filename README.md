@@ -13,14 +13,15 @@ Runtime dependencies are local to this repo + installed libraries:
 1. Generate a fixed set of strategies for an intent.
 2. Generate Google-only queries for each strategy.
 3. Fetch two SERP pages per query.
-4. Canonicalize and deduplicate URLs.
-5. Check novelty against a baseline domain file.
-6. Build an initial link seed once from `sitemap.xml`, `robots.txt`, and `llms.txt`.
-7. Pass that initial link list to browser delegation at start; do not maintain a mutable site map in-memory.
-8. Use `eu-swarm` only for structured browser plan output.
-9. Execute browser exploration with native `browser-use`, which can navigate to new URLs mid-run.
-10. Decide whether the source is useful and store the result in Mongo.
-11. Log every phase into append-only events.
+4. Collapse SERP hits to one unique registrable domain per candidate source.
+5. Choose a start surface per candidate (`domain_homepage` or `first_result_url`).
+6. Check novelty against a baseline domain file.
+7. Build an initial link seed once from `sitemap.xml`, `robots.txt`, and `llms.txt`.
+8. Pass that initial link list to browser delegation at start; do not maintain a mutable site map in-memory.
+9. Use `eu-swarm` only for structured browser plan output.
+10. Execute browser exploration with native `browser-use`, which can navigate to new URLs mid-run and call extra tools such as PDF verification.
+11. Decide whether the source is useful, store evidence, and save one combined reasoning field.
+12. Log every phase into append-only events.
 
 ## Run
 
@@ -54,7 +55,10 @@ Important behavior:
 - `MONGODB_URI` must be set in this repo config.
 - `MAX_BROWSER_CONCURRENCY=0` means unlimited.
 - `MAX_URL_CONCURRENCY=0` means unlimited.
+- `CANDIDATE_START_MODE=domain_homepage` means one candidate per unique domain and the normal agent starts from the domain homepage.
+- `CANDIDATE_START_MODE=first_result_url` means one candidate per unique domain but the normal agent starts from the first SERP URL seen for that domain.
 - `MAX_SITE_GRAPH_FRONTIER` controls how many initial seeded links are passed into browser delegation.
+- `PDF_INLINE_MAX_BYTES` limits direct inline Gemini PDF verification size.
 - `KNOWN_TOOLS_FILE` provides the static duplicate-tool baseline.
 - `VPN_OVPN_CONFIG` points to your OpenVPN config path.
 - `VPN_DEFAULTS_FILE` provides local fallback defaults for DocDB host/port and split tunnel preference.
