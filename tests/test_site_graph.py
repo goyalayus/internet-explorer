@@ -77,7 +77,11 @@ async def test_site_graph_bootstrap_collects_structure_sources(tmp_path: Path) -
                 final_url="https://example.com/llms.txt",
                 status_code=200,
                 content_type="text/plain",
-                body_text="- API reference (/developers/api)\n- Datasets (https://example.com/data/catalog)\n",
+                body_text=(
+                    "- API reference (/developers/api)\n"
+                    "- Datasets (https://example.com/data/catalog)\n"
+                    "//[broken\n"
+                ),
                 text_excerpt="",
             ),
             "https://example.com/llm.txt": FetchResult(
@@ -129,6 +133,7 @@ async def test_site_graph_bootstrap_collects_structure_sources(tmp_path: Path) -
     assert "https://example.com/developers/api" in urls
     assert "https://example.com/data/catalog" in urls
     assert "https://example.com/rfp/current" in urls
+    assert not any("[broken" in url for url in urls)
     assert "/robots.txt" in snapshot.bootstrap_sources
     assert "/llms.txt" in snapshot.bootstrap_sources
 

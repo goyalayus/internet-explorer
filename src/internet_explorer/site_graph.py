@@ -698,7 +698,9 @@ def _parse_robots(text: str, root_url: str) -> tuple[list[str], list[str]]:
         key = key.strip().lower()
         value = value.strip()
         if key == "sitemap":
-            sitemaps.append(urljoin(root_url, value))
+            joined = _safe_urljoin(root_url, value)
+            if joined:
+                sitemaps.append(joined)
             continue
         if key not in {"allow", "disallow"}:
             continue
@@ -706,7 +708,9 @@ def _parse_robots(text: str, root_url: str) -> tuple[list[str], list[str]]:
             continue
         lowered = value.lower()
         if any(keyword in lowered for keyword in ROBOTS_PATH_KEYWORDS):
-            paths.append(urljoin(root_url, value))
+            joined = _safe_urljoin(root_url, value)
+            if joined:
+                paths.append(joined)
     return _unique(sitemaps), _unique(paths)
 
 
@@ -715,11 +719,15 @@ def _parse_llm_manifest(text: str, root_url: str) -> list[str]:
     for match in re.findall(r"https?://[^\s)>\"]+", text):
         urls.append(match)
     for match in re.findall(r"\((/[^)\s]+)\)", text):
-        urls.append(urljoin(root_url, match))
+        joined = _safe_urljoin(root_url, match)
+        if joined:
+            urls.append(joined)
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if line.startswith("/") and " " not in line:
-            urls.append(urljoin(root_url, line))
+            joined = _safe_urljoin(root_url, line)
+            if joined:
+                urls.append(joined)
     return _unique(urls)
 
 
@@ -757,6 +765,13 @@ def _find_xml_text(node: ET.Element, tag_name: str) -> str:
 
 def _strip_namespace(tag: str) -> str:
     return tag.split("}", 1)[-1]
+
+
+def _safe_urljoin(base: str, value: str) -> str:
+    try:
+        return urljoin(base, value)
+    except ValueError:
+        return ""
 
 
 def _signals_from_evidence(evidence: PageEvidence) -> list[str]:
