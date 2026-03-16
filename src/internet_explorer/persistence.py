@@ -9,6 +9,27 @@ from pymongo.collection import Collection
 from internet_explorer.config import AppConfig
 from internet_explorer.models import RunSummary, UrlEvaluation
 
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+
+
+def _sanitize_bson(value: Any) -> Any:
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        if value < _INT64_MIN or value > _INT64_MAX:
+            return str(value)
+        return value
+    if isinstance(value, dict):
+        return {str(key): _sanitize_bson(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_bson(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_bson(item) for item in value]
+    if isinstance(value, set):
+        return [_sanitize_bson(item) for item in value]
+    return value
+
 
 class MongoPersistence:
     def __init__(self, config: AppConfig) -> None:
@@ -38,17 +59,17 @@ class MongoPersistence:
                 "updated_at": datetime.utcnow(),
             }
         )
-        self.runs.insert_one(doc)
+        self.runs.insert_one(_sanitize_bson(doc))
 
     def update_run(self, run_id: str, fields: dict[str, Any]) -> None:
         fields = dict(fields)
         fields["updated_at"] = datetime.utcnow()
-        self.runs.update_one({"run_id": run_id}, {"$set": fields}, upsert=False)
+        self.runs.update_one({"run_id": run_id}, {"$set": _sanitize_bson(fields)}, upsert=False)
 
     def log_event(self, event: dict[str, Any]) -> None:
         payload = dict(event)
         payload.setdefault("timestamp", datetime.utcnow())
-        self.events.insert_one(payload)
+        self.events.insert_one(_sanitize_bson(payload))
 
     def upsert_url_summary(self, run_id: str, evaluation: UrlEvaluation, extra: dict[str, Any] | None = None) -> None:
         doc = evaluation.model_dump(mode="json")
@@ -58,6 +79,6 @@ class MongoPersistence:
             doc.update(extra)
         self.url_summaries.update_one(
             {"run_id": run_id, "url_id": evaluation.url_id},
-            {"$set": doc, "$setOnInsert": {"created_at": datetime.utcnow()}},
+            {"$set": _sanitize_bson(doc), "$setOnInsert": {"created_at": datetime.utcnow()}},
             upsert=True,
         )
