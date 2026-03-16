@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 
 from internet_explorer.browser_delegate import BrowserDelegationManager
@@ -125,16 +126,12 @@ class IntentDiscoveryService:
                 },
             )
 
-            evaluations = await self._evaluate_candidates(intent, deduped_candidates, evaluator, telemetry)
-            summary.evaluated_url_count = len(evaluations)
-            summary.useful_url_count = sum(1 for evaluation in evaluations if evaluation.useful)
-            summary.evaluated_source_count = summary.evaluated_url_count
-            summary.useful_source_count = summary.useful_url_count
-            summary.browser_peak_active = browser_manager.peak
-            summary.finished_at = datetime.utcnow()
-            summary.status = "completed"
+            evaluation_counts = {"evaluated": 0, "useful": 0}
 
-            for evaluation in evaluations:
+            def _record_evaluation(evaluation) -> None:
+                evaluation_counts["evaluated"] += 1
+                if evaluation.useful:
+                    evaluation_counts["useful"] += 1
                 self.persistence.upsert_url_summary(run_id, evaluation)
                 telemetry.emit(
                     phase="db_write",
@@ -143,6 +140,31 @@ class IntentDiscoveryService:
                     output_summary={"url_id": evaluation.url_id, "useful": evaluation.useful},
                     decision="url_summary_upserted",
                 )
+                self.persistence.update_run(
+                    run_id,
+                    {
+                        "evaluated_url_count": evaluation_counts["evaluated"],
+                        "useful_url_count": evaluation_counts["useful"],
+                        "evaluated_source_count": evaluation_counts["evaluated"],
+                        "useful_source_count": evaluation_counts["useful"],
+                        "browser_peak_active": browser_manager.peak,
+                    },
+                )
+
+            evaluations = await self._evaluate_candidates(
+                intent,
+                deduped_candidates,
+                evaluator,
+                telemetry,
+                on_result=_record_evaluation,
+            )
+            summary.evaluated_url_count = evaluation_counts["evaluated"]
+            summary.useful_url_count = evaluation_counts["useful"]
+            summary.evaluated_source_count = summary.evaluated_url_count
+            summary.useful_source_count = summary.useful_url_count
+            summary.browser_peak_active = browser_manager.peak
+            summary.finished_at = datetime.utcnow()
+            summary.status = "completed"
 
             self.persistence.update_run(run_id, summary.model_dump(mode="json"))
             return summary
@@ -224,6 +246,7 @@ class IntentDiscoveryService:
         candidates: list[UrlCandidate],
         evaluator: UrlEvaluator,
         telemetry: Telemetry,
+        on_result: Callable[[object], None] | None = None,
     ):
         semaphore = asyncio.Semaphore(self.config.max_url_concurrency) if self.config.max_url_concurrency > 0 else None
         batch_size = max(1, self.config.url_batch_size)
@@ -251,8 +274,21 @@ class IntentDiscoveryService:
                 output_summary={"url_ids": [candidate.url_id for candidate in batch[:50]]},
                 decision="batch_start",
             )
-            batch_results = await asyncio.gather(*(run_one(candidate) for candidate in batch))
-            all_results.extend(batch_results)
+            tasks = [asyncio.create_task(run_one(candidate)) for candidate in batch]
+            batch_results = []
+            try:
+                for finished in asyncio.as_completed(tasks):
+                    result = await finished
+                    batch_results.append(result)
+                    all_results.append(result)
+                    if on_result is not None:
+                        on_result(result)
+            except Exception:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
             telemetry.emit(
                 phase="triage",
                 actor="system",
