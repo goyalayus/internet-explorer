@@ -140,13 +140,38 @@ class PdfVerifierService:
                 return result
             raise
         except Exception as exc:
+            error_text = f"{type(exc).__name__}:{exc}"
+            if "The document has no pages." in error_text:
+                fallback_url = fetched.final_url if "fetched" in locals() else canonical_pdf_url
+                result = PdfVerificationResult(
+                    url=canonical_pdf_url,
+                    final_url=fallback_url,
+                    status_code=fetched.status_code if "fetched" in locals() else None,
+                    content_type=fetched.content_type if "fetched" in locals() else "application/pdf",
+                    relevant=False,
+                    reasoning="PDF appears unreadable or empty for model-based parsing. Use parent listing pages for source assessment.",
+                    summary="Unreadable/empty PDF fallback used.",
+                    extracted_signals=_keyword_signals_from_url(fallback_url)[:12],
+                    fallback_urls=_fallback_urls(fallback_url),
+                    error=error_text,
+                )
+                self._emit(
+                    url_id=url_id,
+                    intent=intent,
+                    pdf_url=canonical_pdf_url,
+                    result=result,
+                    decision="pdf_verify_unreadable_fallback",
+                    started=started,
+                    error_code="PdfUnreadable",
+                )
+                return result
             result = PdfVerificationResult(
                 url=canonical_pdf_url,
                 relevant=False,
                 reasoning="PDF verification failed before the document could be judged.",
                 summary="Inspect telemetry and retry this document later.",
                 fallback_urls=_fallback_urls(canonical_pdf_url),
-                error=f"{type(exc).__name__}:{exc}",
+                error=error_text,
             )
             self._emit(url_id=url_id, intent=intent, pdf_url=canonical_pdf_url, result=result, decision="pdf_verify_error", started=started, error_code=type(exc).__name__)
             return result
