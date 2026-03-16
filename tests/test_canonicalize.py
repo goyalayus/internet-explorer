@@ -13,3 +13,11 @@ def test_registrable_domain_handles_common_cases() -> None:
 
 def test_canonical_domain_strips_www() -> None:
     assert canonical_domain("https://www.example.com/test") == "example.com"
+
+
+def test_canonicalize_url_handles_invalid_ipv6_url() -> None:
+    assert canonicalize_url("https://[invalid") == ""
+
+
+def test_canonical_domain_handles_invalid_ipv6_url() -> None:
+    assert canonical_domain("https://[invalid") == ""

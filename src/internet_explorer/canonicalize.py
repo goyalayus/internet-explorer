@@ -24,12 +24,23 @@ _TLD_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=None)
 
 
 def canonicalize_url(raw_url: str) -> str:
-    parsed = urlparse(raw_url.strip())
+    raw = (raw_url or "").strip()
+    if not raw:
+        return ""
+    parsed = _safe_urlparse(raw)
+    if parsed is None:
+        return ""
     scheme = parsed.scheme or "https"
     netloc = parsed.netloc.lower()
     if not netloc and parsed.path:
-        parsed = urlparse(f"{scheme}://{parsed.path}")
+        parsed = _safe_urlparse(f"{scheme}://{parsed.path}")
+        if parsed is None:
+            return ""
         netloc = parsed.netloc.lower()
+    if not netloc:
+        return ""
+    if "%5b" in netloc or "%5d" in netloc:
+        return ""
     if netloc.startswith("www."):
         netloc = netloc[4:]
     path = parsed.path or "/"
@@ -45,9 +56,18 @@ def canonicalize_url(raw_url: str) -> str:
 
 
 def canonical_domain(url_or_domain: str) -> str:
-    raw = url_or_domain.strip().lower()
+    raw = (url_or_domain or "").strip().lower()
+    if not raw:
+        return ""
     if "://" in raw:
-        raw = urlparse(raw).netloc.lower()
+        parsed = _safe_urlparse(raw)
+        if parsed is None:
+            return ""
+        raw = parsed.netloc.lower()
+    if not raw:
+        return ""
+    if "%5b" in raw or "%5d" in raw:
+        return ""
     if raw.startswith("www."):
         raw = raw[4:]
     return raw
@@ -79,3 +99,14 @@ def load_baseline_domains(path: Path) -> set[str]:
             continue
         domains.add(registrable_domain(stripped))
     return domains
+
+
+def _safe_urlparse(raw: str):
+    try:
+        return urlparse(raw)
+    except ValueError:
+        sanitized = raw.replace("[", "%5B").replace("]", "%5D")
+        try:
+            return urlparse(sanitized)
+        except ValueError:
+            return None
