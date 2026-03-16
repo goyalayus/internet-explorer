@@ -269,7 +269,11 @@ class SiteGraph:
             existing = self._nodes.get(canonical)
             node = self._ensure_node(url, discovered_via="html_link", depth=existing.depth if existing else 0)
             if node is None:
-                raise ValueError(f"unable to record analysis for url={url}")
+                node = self._ephemeral_node(
+                    url,
+                    discovered_via="html_link",
+                    depth=existing.depth if existing else 0,
+                )
             node.title = evidence.title or node.title
             node.status = status
             node.last_render_profile = render_profile
@@ -292,7 +296,11 @@ class SiteGraph:
             existing = self._nodes.get(canonical)
             node = self._ensure_node(url, discovered_via="browser_click", depth=existing.depth if existing else 0)
             if node is None:
-                raise ValueError(f"unable to record browser result for url={url}")
+                node = self._ephemeral_node(
+                    url,
+                    discovered_via="browser_click",
+                    depth=existing.depth if existing else 0,
+                )
             node.status = "delegated_browser"
             node.last_visited_at = datetime.now(timezone.utc)
             extra_signals = [signal for signal, present in (
@@ -333,7 +341,11 @@ class SiteGraph:
             existing = self._nodes.get(canonical)
             node = self._ensure_node(url, discovered_via="browser_click", depth=existing.depth if existing else 0)
             if node is None:
-                raise ValueError(f"unable to update node for url={url}")
+                node = self._ephemeral_node(
+                    url,
+                    discovered_via="browser_click",
+                    depth=existing.depth if existing else 0,
+                )
             if title:
                 node.title = title
             if page_type_guess:
@@ -492,6 +504,17 @@ class SiteGraph:
             node.depth = min(node.depth, depth)
         node.priority_score = self._score_node(node)
         return node
+
+    def _ephemeral_node(self, url: str, *, discovered_via: str, depth: int) -> SiteGraphNode:
+        canonical = _safe_canonical_url(url) or canonicalize_url(url) or url
+        page_type_guess = self._infer_page_type(canonical, "", "", [], preferred="")
+        return SiteGraphNode(
+            canonical_url=canonical,
+            page_type_guess=page_type_guess,
+            discovered_via=[discovered_via],
+            depth=max(depth, 0),
+            priority_score=0.0,
+        )
 
     def _add_edge(self, from_url: str, to_url: str, *, discovered_via: str) -> None:
         source = _safe_canonical_url(from_url)

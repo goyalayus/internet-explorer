@@ -166,6 +166,33 @@ def test_site_graph_record_analysis_stores_summary_and_signals(tmp_path: Path) -
     assert "Developer API Reference" in node.summary
 
 
+def test_site_graph_record_analysis_survives_full_node_budget(tmp_path: Path) -> None:
+    config = _config(tmp_path).model_copy(update={"max_site_graph_nodes": 2})
+    graph = SiteGraph(
+        config=config,
+        telemetry=_TelemetryStub(),
+        url_id="url_full",
+        intent="find procurement api docs",
+        seed_url="https://example.com/start",
+        domain="example.com",
+    )
+
+    node = graph.record_analysis(
+        url="https://example.com/developers/api",
+        render_profile="static_ssr",
+        evidence=PageEvidence(
+            url="https://example.com/developers/api",
+            title="Developer API Reference",
+            text_excerpt="Procurement API and tender endpoints.",
+            api_signal=ApiSignal(detected=True),
+        ),
+    )
+
+    assert node.canonical_url == "https://example.com/developers/api"
+    assert node.status == "analyzed"
+    assert "api" in node.signals
+
+
 def test_site_graph_frontier_prioritizes_relevant_pages(tmp_path: Path) -> None:
     config = _config(tmp_path)
     graph = SiteGraph(

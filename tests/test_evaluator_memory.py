@@ -276,6 +276,40 @@ async def test_evaluator_normalizes_category_reason_shape(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_evaluator_accepts_string_source_evidence_urls(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    evaluator = UrlEvaluator(
+        config,
+        _LLMStub(
+            tool_terms=["newsource"],
+            decision_payload={
+                "useful": True,
+                "outcome": "data_on_site",
+                "reasoning": "Relevant procurement listings are visible.",
+                "api_stage": "none",
+                "source_evidence": [
+                    "https://example.com/rfp/current",
+                    "https://example.com/openapi.json",
+                ],
+            },
+        ),
+        _FetcherStub(_responses()),
+        _TelemetryStub(),
+        _BrowserManagerStub(),
+        tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
+    )
+    candidate = _candidate("url_5")
+
+    evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
+
+    assert evaluation.useful is True
+    evidence_by_url = {item.url: item.kind for item in evaluation.source_evidence}
+    assert evidence_by_url["https://example.com/rfp/current"] == "page"
+    assert evidence_by_url["https://example.com/openapi.json"] == "api"
+    assert all(not note.startswith("evaluation_error:") for note in evaluation.notes)
+
+
+@pytest.mark.asyncio
 async def test_evaluator_marks_unknown_when_all_fetches_fail(tmp_path: Path) -> None:
     config = _config(tmp_path)
     evaluator = UrlEvaluator(
