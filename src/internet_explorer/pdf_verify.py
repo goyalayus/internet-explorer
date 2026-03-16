@@ -52,6 +52,30 @@ class PdfVerifierService:
                 )
                 self._emit(url_id=url_id, intent=intent, pdf_url=canonical_pdf_url, result=result, decision="pdf_fetch_failed", started=started)
                 return result
+            if not fetched.content_bytes:
+                fallback_url = fetched.final_url or canonical_pdf_url
+                result = PdfVerificationResult(
+                    url=canonical_pdf_url,
+                    final_url=fallback_url,
+                    status_code=fetched.status_code,
+                    content_type=fetched.content_type or "application/pdf",
+                    relevant=False,
+                    reasoning="PDF response was empty, so inline verification was skipped. Use parent listing pages for source assessment.",
+                    summary="Empty PDF fallback used.",
+                    extracted_signals=_keyword_signals_from_url(fallback_url)[:12],
+                    fallback_urls=_fallback_urls(fallback_url),
+                    error="ValueError:pdf_empty_bytes",
+                )
+                self._emit(
+                    url_id=url_id,
+                    intent=intent,
+                    pdf_url=canonical_pdf_url,
+                    result=result,
+                    decision="pdf_verify_unreadable_fallback",
+                    started=started,
+                    error_code="PdfEmpty",
+                )
+                return result
 
             decision = await self.llm.complete_pdf_json(
                 system_prompt=PDF_VERIFY_SYSTEM_PROMPT,
