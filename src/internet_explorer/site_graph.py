@@ -559,7 +559,12 @@ class SiteGraph:
         return round(score, 3)
 
     def _site_root(self, url: str) -> str:
-        parsed = urlparse(url)
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return self.root_url
+        if not parsed.scheme or not parsed.netloc:
+            return self.root_url
         return f"{parsed.scheme}://{parsed.netloc}/"
 
     def _note_bootstrap_source(self, source: str) -> None:

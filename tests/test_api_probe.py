@@ -116,3 +116,22 @@ def test_probe_result_treats_head_pipe_close_as_success() -> None:
     assert result.success is True
     assert result.accessible is True
     assert result.error == ""
+
+
+def test_pick_probe_url_skips_invalid_url() -> None:
+    service = ApiProbeService(_TelemetryStub(), _LLMStub())
+    signal = ApiSignal(
+        detected=True,
+        openapi_links=["https://[invalid"],
+        doc_links=["https://example.com/developers/reference"],
+    )
+
+    assert service._pick_probe_url(signal) == "https://example.com/developers/reference"
+
+
+def test_guess_content_type_handles_invalid_url() -> None:
+    service = ApiProbeService(_TelemetryStub(), _LLMStub())
+
+    content_type = service._guess_content_type("https://[invalid", "{\"openapi\":\"3.1.0\"}")
+
+    assert content_type == "application/json"

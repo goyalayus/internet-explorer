@@ -258,3 +258,17 @@ def test_site_graph_allows_browser_added_links_from_direct_deep_page(tmp_path: P
     assert deep_url in urls
     assert child_url in urls
     assert (deep_url, child_url) in edges
+
+
+def test_site_graph_site_root_handles_invalid_url(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    graph = SiteGraph(
+        config=config,
+        telemetry=_TelemetryStub(),
+        url_id="url_invalid_root",
+        intent="find api docs",
+        seed_url="https://example.com/",
+        domain="example.com",
+    )
+
+    assert graph._site_root("https://[invalid") == "https://example.com/"

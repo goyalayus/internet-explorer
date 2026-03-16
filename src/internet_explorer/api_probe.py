@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel
 
 from internet_explorer.bash_runner import BashRunner
+from internet_explorer.canonicalize import canonicalize_url
 from internet_explorer.llm import LLMClient
 from internet_explorer.models import ApiProbeResult, ApiSignal, PageEvidence
 from internet_explorer.telemetry import Telemetry
@@ -182,13 +183,17 @@ class ApiProbeService:
 
     def _pick_probe_url(self, api_signal: ApiSignal) -> str:
         for link in api_signal.openapi_links:
-            if link and not _looks_like_document_url(link):
-                return link
+            normalized = _normalize_probe_url(link)
+            if normalized and not _looks_like_document_url(normalized):
+                return normalized
         for link in api_signal.doc_links:
-            if link and not _looks_like_document_url(link):
-                return link
+            normalized = _normalize_probe_url(link)
+            if normalized and not _looks_like_document_url(normalized):
+                return normalized
         if api_signal.graphql_hints:
-            return api_signal.graphql_hints[0]
+            normalized = _normalize_probe_url(api_signal.graphql_hints[0])
+            if normalized:
+                return normalized
         return ""
 
     def _merge_signal(self, evidence: list[PageEvidence]) -> ApiSignal:
@@ -255,8 +260,8 @@ class ApiProbeService:
         return "", stdout
 
     def _guess_content_type(self, url: str, body: str) -> str:
-        parsed = urlparse(url)
-        path = parsed.path.lower()
+        parsed = _safe_urlparse(url)
+        path = parsed.path.lower() if parsed else ""
         if path.endswith(".json"):
             return "application/json"
         if path.endswith(".yaml") or path.endswith(".yml"):
@@ -296,9 +301,25 @@ class ApiProbeService:
 
 
 def _looks_like_document_url(url: str) -> bool:
-    parsed = urlparse(url)
-    suffix = PurePosixPath(parsed.path.lower()).suffix
+    parsed = _safe_urlparse(url)
+    suffix = PurePosixPath((parsed.path if parsed else "").lower()).suffix
     if suffix in {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".zip", ".csv"}:
         return True
     lowered = url.lower()
     return any(token in lowered for token in ("/download/", "download=", "bitstreams/", "/content"))
+
+
+def _safe_urlparse(url: str):
+    try:
+        return urlparse(url)
+    except ValueError:
+        return None
+
+
+def _normalize_probe_url(raw_url: str) -> str:
+    canonical = canonicalize_url(raw_url)
+    if not canonical:
+        return ""
+    if not canonical.startswith(("http://", "https://")):
+        return ""
+    return canonical
