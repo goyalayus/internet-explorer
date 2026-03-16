@@ -45,9 +45,29 @@ class _BrowserManagerStub:
 
 
 class _LLMStub:
-    def __init__(self, *, tool_terms: list[str], decision_payload: dict | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        tool_terms: list[str],
+        decision_payload: dict | None = None,
+        nav_payloads: list[dict] | None = None,
+    ) -> None:
         self.nav_calls = 0
         self.tool_terms = tool_terms
+        self.nav_payloads = nav_payloads or [
+            {
+                "reasoning": "Visit seed page first.",
+                "action": "fetch_url",
+                "target_url": "https://example.com/",
+                "action_notes": ["seed"],
+            },
+            {
+                "reasoning": "Enough evidence collected.",
+                "action": "stop",
+                "target_url": "",
+                "action_notes": [],
+            },
+        ]
         self.decision_payload = decision_payload or {
             "useful": True,
             "relevance_score": 0.84,
@@ -61,23 +81,8 @@ class _LLMStub:
         name = schema.__name__
         if name == "_NavigationPlanEnvelope":
             self.nav_calls += 1
-            if self.nav_calls == 1:
-                return schema.model_validate(
-                    {
-                        "reasoning": "Visit seed page first.",
-                        "action": "fetch_url",
-                        "target_url": "https://example.com/",
-                        "action_notes": ["seed"],
-                    }
-                )
-            return schema.model_validate(
-                {
-                    "reasoning": "Enough evidence collected.",
-                    "action": "stop",
-                    "target_url": "",
-                    "action_notes": [],
-                }
-            )
+            index = min(self.nav_calls - 1, len(self.nav_payloads) - 1)
+            return schema.model_validate(self.nav_payloads[index])
         if name in {"_DecisionEnvelope", "_DecisionRawEnvelope"}:
             return schema.model_validate(self.decision_payload)
         if name == "_ToolTermEnvelope":
@@ -307,6 +312,42 @@ async def test_evaluator_accepts_string_source_evidence_urls(tmp_path: Path) -> 
     assert evidence_by_url["https://example.com/rfp/current"] == "page"
     assert evidence_by_url["https://example.com/openapi.json"] == "api"
     assert all(not note.startswith("evaluation_error:") for note in evaluation.notes)
+
+
+@pytest.mark.asyncio
+async def test_evaluator_ignores_delegate_action_when_browser_disabled(tmp_path: Path) -> None:
+    config = _config(tmp_path).model_copy(update={"enable_browser_delegation": False})
+    evaluator = UrlEvaluator(
+        config,
+        _LLMStub(
+            tool_terms=["newsource"],
+            nav_payloads=[
+                {
+                    "reasoning": "Use browser for the first page.",
+                    "action": "delegate_browser",
+                    "target_url": "https://example.com/",
+                    "action_notes": [],
+                },
+                {
+                    "reasoning": "Enough evidence collected.",
+                    "action": "stop",
+                    "target_url": "",
+                    "action_notes": [],
+                },
+            ],
+        ),
+        _FetcherStub(_responses()),
+        _TelemetryStub(),
+        _BrowserManagerStub(),
+        tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
+    )
+    candidate = _candidate("url_6")
+
+    evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
+
+    assert evaluation.useful is True
+    assert len(evaluation.visited_memory) == 1
+    assert evaluation.visited_memory[0].url == "https://example.com/"
 
 
 @pytest.mark.asyncio

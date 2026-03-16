@@ -636,16 +636,24 @@ class UrlEvaluator:
             "initial_links": initial_links[:40],
         }
         try:
+            allowed_actions = set(VALID_NAV_ACTIONS)
+            if not self.config.enable_browser_delegation:
+                allowed_actions.discard("delegate_browser")
+            browser_rule = (
+                "- Prefer fetch_url before delegate_browser unless JS interaction is likely necessary.\n"
+                if "delegate_browser" in allowed_actions
+                else "- Browser delegation is disabled for this run, so stay in normal-agent navigation.\n"
+            )
             response = await self.llm.complete_json(
                 system_prompt=NAVIGATION_SYSTEM_PROMPT,
                 user_prompt=(
                     "Plan one next action for datasource evaluation.\n\n"
                     f"{prompt}\n\n"
                     "Rules:\n"
-                    "- Allowed actions: fetch_url, read_node, delegate_browser, stop.\n"
+                    f"- Allowed actions: {', '.join(sorted(allowed_actions))}.\n"
                     "- Use read_node when you need a longer summary from the site graph.\n"
                     "- Keep target_url in the same registrable domain as candidate when possible.\n"
-                    "- Prefer fetch_url before delegate_browser unless JS interaction is likely necessary.\n"
+                    f"{browser_rule}"
                     "- If captcha is already present in signals, prefer stop or classify via final decision.\n"
                     "- If a PDF already proved relevance, you can still fetch a portal/homepage page to discover a reusable recurring access surface.\n"
                     "- Return strict JSON only.\n"
@@ -654,7 +662,7 @@ class UrlEvaluator:
                 temperature=0.0,
                 max_completion_tokens=700,
             )
-            action = response.action if response.action in VALID_NAV_ACTIONS else "fetch_url"
+            action = response.action if response.action in allowed_actions else "fetch_url"
             return _NavigationPlanEnvelope(
                 reasoning=response.reasoning.strip(),
                 action=action,
