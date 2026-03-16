@@ -44,7 +44,7 @@ class _DecisionRawEnvelope(BaseModel):
     outcome: str | None = None
     reasoning: str | None = None
     api_stage: str | None = None
-    source_evidence: list[SourceEvidenceItem] | list[dict[str, Any]] | None = None
+    source_evidence: Any | None = None
     notes: list[str] | str | None = None
 
     reason: str | None = None
@@ -1064,11 +1064,46 @@ def _normalize_source_evidence(raw: Any) -> list[SourceEvidenceItem]:
         return []
     items: list[SourceEvidenceItem] = []
     for value in raw:
+        item = _coerce_source_evidence_item(value)
+        if item is not None:
+            items.append(item)
+    return _merge_source_evidence([], items)
+
+
+def _coerce_source_evidence_item(value: Any) -> SourceEvidenceItem | None:
+    if isinstance(value, SourceEvidenceItem):
+        return value
+    if isinstance(value, dict):
+        payload = dict(value)
+        raw_url = str(payload.get("url") or "").strip()
+        if raw_url:
+            payload["url"] = canonicalize_url(raw_url)
+        if not payload.get("kind"):
+            payload["kind"] = _guess_evidence_kind(raw_url)
         try:
-            items.append(SourceEvidenceItem.model_validate(value))
+            return SourceEvidenceItem.model_validate(payload)
         except Exception:
-            continue
-    return items
+            return None
+    if isinstance(value, str):
+        raw_url = value.strip()
+        if raw_url.startswith(("http://", "https://")):
+            return SourceEvidenceItem(
+                kind=_guess_evidence_kind(raw_url),
+                url=canonicalize_url(raw_url),
+                summary="",
+            )
+    return None
+
+
+def _guess_evidence_kind(url: str) -> str:
+    lowered = url.lower()
+    if lowered.endswith(".pdf"):
+        return "pdf"
+    if any(token in lowered for token in ("openapi", "swagger", "graphql", "/api", "developer")):
+        return "api"
+    if any(token in lowered for token in ("dataset", "/data", "catalog")):
+        return "dataset"
+    return "page"
 
 
 def _coerce_bool(value: Any) -> bool | None:
