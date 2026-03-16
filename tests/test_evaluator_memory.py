@@ -51,9 +51,11 @@ class _LLMStub:
         tool_terms: list[str],
         decision_payload: dict | None = None,
         nav_payloads: list[dict] | None = None,
+        decision_error: Exception | None = None,
     ) -> None:
         self.nav_calls = 0
         self.tool_terms = tool_terms
+        self.decision_error = decision_error
         self.nav_payloads = nav_payloads or [
             {
                 "reasoning": "Visit seed page first.",
@@ -84,6 +86,8 @@ class _LLMStub:
             index = min(self.nav_calls - 1, len(self.nav_payloads) - 1)
             return schema.model_validate(self.nav_payloads[index])
         if name in {"_DecisionEnvelope", "_DecisionRawEnvelope"}:
+            if self.decision_error is not None:
+                raise self.decision_error
             return schema.model_validate(self.decision_payload)
         if name == "_ToolTermEnvelope":
             return schema.model_validate({"terms": self.tool_terms, "reason": "stub"})
@@ -369,3 +373,27 @@ async def test_evaluator_marks_unknown_when_all_fetches_fail(tmp_path: Path) -> 
     assert evaluation.outcome == "unknown"
     assert "unknown_fetch_failure" in evaluation.notes
     assert evaluation.tool_duplicate_signal.checked is False
+
+
+@pytest.mark.asyncio
+async def test_evaluator_uses_decision_fallback_when_llm_decision_fails(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    evaluator = UrlEvaluator(
+        config,
+        _LLMStub(
+            tool_terms=["newsource"],
+            decision_error=ValueError("Could not parse JSON object from LLM response"),
+        ),
+        _FetcherStub(_responses()),
+        _TelemetryStub(),
+        _BrowserManagerStub(),
+        tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
+    )
+    candidate = _candidate("url_7")
+
+    evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
+
+    assert evaluation.useful is True
+    assert evaluation.outcome == "data_on_site"
+    assert any(note.startswith("decision_fallback:") for note in evaluation.notes)
+    assert all(not note.startswith("evaluation_error:") for note in evaluation.notes)

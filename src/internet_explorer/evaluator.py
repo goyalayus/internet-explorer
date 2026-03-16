@@ -792,33 +792,43 @@ class UrlEvaluator:
             "browser_result": browser_result.model_dump(mode="json") if browser_result else None,
             "api_probe": api_probe.model_dump(mode="json") if api_probe else None,
         }
-        response = await self.llm.complete_json(
-            system_prompt=DECISION_SYSTEM_PROMPT,
-            user_prompt=(
-                "Decide whether this domain/source is a useful datasource for the intent.\n\n"
-                f"{prompt}\n\n"
-                "Rules:\n"
-                "- Use only visited_pages, source_evidence, browser_result, and api_probe as evidence.\n"
-                "- `data_on_site` when valuable data appears directly on the site, files, portal, or listings.\n"
-                "- `api_available` when API/docs/endpoints are present and seem workable.\n"
-                "- `contact_sales_only` when only sales/demo access exists.\n"
-                "- `paywall` when payment/upgrade is required for access.\n"
-                "- `irrelevant` when it does not materially help the intent.\n"
-                "- Novelty matters, but a non-novel source can still be useful.\n"
-                "- `reasoning` must explain both why the source is correct and the rough recurring access path on this domain.\n"
-                "- Return JSON with EXACT keys:\n"
-                "  useful (boolean), relevance_score (0..1 float), outcome,\n"
-                "  reasoning, api_stage, source_evidence (list), notes (list).\n"
-                "- Be strict. Return only JSON.\n"
-            ),
-            schema=_DecisionRawEnvelope,
-            temperature=0.0,
-            max_completion_tokens=2200,
-        )
-        return _normalize_decision_response(
-            response,
-            inferred_source_evidence=_infer_source_evidence(page_evidence, browser_result, source_evidence, api_probe),
-        )
+        inferred_source_evidence = _infer_source_evidence(page_evidence, browser_result, source_evidence, api_probe)
+        try:
+            response = await self.llm.complete_json(
+                system_prompt=DECISION_SYSTEM_PROMPT,
+                user_prompt=(
+                    "Decide whether this domain/source is a useful datasource for the intent.\n\n"
+                    f"{prompt}\n\n"
+                    "Rules:\n"
+                    "- Use only visited_pages, source_evidence, browser_result, and api_probe as evidence.\n"
+                    "- `data_on_site` when valuable data appears directly on the site, files, portal, or listings.\n"
+                    "- `api_available` when API/docs/endpoints are present and seem workable.\n"
+                    "- `contact_sales_only` when only sales/demo access exists.\n"
+                    "- `paywall` when payment/upgrade is required for access.\n"
+                    "- `irrelevant` when it does not materially help the intent.\n"
+                    "- Novelty matters, but a non-novel source can still be useful.\n"
+                    "- `reasoning` must explain both why the source is correct and the rough recurring access path on this domain.\n"
+                    "- Return JSON with EXACT keys:\n"
+                    "  useful (boolean), relevance_score (0..1 float), outcome,\n"
+                    "  reasoning, api_stage, source_evidence (list), notes (list).\n"
+                    "- Be strict. Return only JSON.\n"
+                ),
+                schema=_DecisionRawEnvelope,
+                temperature=0.0,
+                max_completion_tokens=2200,
+            )
+            return _normalize_decision_response(
+                response,
+                inferred_source_evidence=inferred_source_evidence,
+            )
+        except Exception as exc:
+            return _fallback_decision_from_evidence(
+                page_evidence=page_evidence,
+                browser_result=browser_result,
+                api_probe=api_probe,
+                source_evidence=inferred_source_evidence,
+                error=type(exc).__name__,
+            )
 
     async def _assess_tool_duplicate(
         self,
@@ -1185,6 +1195,85 @@ def _merge_source_evidence(existing: list[SourceEvidenceItem], incoming: list[So
         seen.add(key)
         merged.append(item)
     return merged
+
+
+def _fallback_decision_from_evidence(
+    *,
+    page_evidence: list[PageEvidence],
+    browser_result,
+    api_probe,
+    source_evidence: list[SourceEvidenceItem],
+    error: str,
+) -> EvaluationDecision:
+    has_paywall = any(item.paywall_present for item in page_evidence) or bool(browser_result and browser_result.paywall_present)
+    has_contact_sales = any(item.contact_sales_present for item in page_evidence) or bool(browser_result and browser_result.contact_sales_only)
+    has_data = bool(
+        any(item.data_signals for item in page_evidence)
+        or any(item.content_kind == "pdf" and item.text_excerpt.strip() for item in page_evidence)
+        or bool(browser_result and browser_result.data_on_site)
+    )
+    has_api = bool(
+        any(item.api_signal.detected for item in page_evidence)
+        or (api_probe and (api_probe.url or api_probe.accessible or api_probe.relevant_guess))
+        or bool(browser_result and browser_result.api_detected)
+    )
+
+    if has_paywall:
+        return EvaluationDecision(
+            useful=True,
+            relevance_score=0.55,
+            outcome="paywall",
+            reasoning="Access appears relevant but gated behind a paywall/upgrade flow. Capture for human follow-up.",
+            api_stage="none",
+            source_evidence=source_evidence,
+            notes=[f"decision_fallback:{error}", "decision_fallback_path:paywall"],
+        )
+    if has_data:
+        return EvaluationDecision(
+            useful=True,
+            relevance_score=0.72,
+            outcome="data_on_site",
+            reasoning="On-site signals indicate recurring procurement/data listings that can be monitored from this domain.",
+            api_stage="none",
+            source_evidence=source_evidence,
+            notes=[f"decision_fallback:{error}", "decision_fallback_path:data_on_site"],
+        )
+    if has_api:
+        api_stage = "api_detected"
+        if api_probe and api_probe.accessible:
+            api_stage = "api_accessible"
+        if api_probe and api_probe.relevant_guess:
+            api_stage = "api_relevant"
+        if api_probe and api_probe.viable_guess:
+            api_stage = "api_viable"
+        return EvaluationDecision(
+            useful=True,
+            relevance_score=0.68,
+            outcome="api_available",
+            reasoning="API-like signals were found and appear potentially usable for recurring extraction.",
+            api_stage=api_stage,
+            source_evidence=source_evidence,
+            notes=[f"decision_fallback:{error}", "decision_fallback_path:api_available"],
+        )
+    if has_contact_sales:
+        return EvaluationDecision(
+            useful=True,
+            relevance_score=0.45,
+            outcome="contact_sales_only",
+            reasoning="Relevant area appears present, but access is primarily sales/demo-gated.",
+            api_stage="none",
+            source_evidence=source_evidence,
+            notes=[f"decision_fallback:{error}", "decision_fallback_path:contact_sales_only"],
+        )
+    return EvaluationDecision(
+        useful=False,
+        relevance_score=0.1,
+        outcome="irrelevant",
+        reasoning="Insufficient direct relevance evidence was found on explored pages.",
+        api_stage="none",
+        source_evidence=source_evidence,
+        notes=[f"decision_fallback:{error}", "decision_fallback_path:irrelevant"],
+    )
 
 
 def _describe_exception(exc: Exception) -> str:
