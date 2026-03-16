@@ -24,6 +24,12 @@ VALID_OUTCOMES = {
     "irrelevant",
     "unknown",
 }
+CLASSIFICATION_ALIASES = {
+    "not_useful": "irrelevant",
+    "not useful": "irrelevant",
+    "not_relevant": "irrelevant",
+    "relevant": "data_on_site",
+}
 
 
 class _VerifyPdfUrlInput(BaseModel):
@@ -360,6 +366,7 @@ class BrowserDelegationManager:
     ) -> BrowserDelegateResult:
         parsed = _extract_json_dict(native_result.get("final_result"))
         classification = str((parsed or {}).get("classification", "unknown")).strip()
+        classification = CLASSIFICATION_ALIASES.get(classification.lower(), classification)
         if classification not in VALID_OUTCOMES:
             classification = "unknown"
 
@@ -381,7 +388,7 @@ class BrowserDelegationManager:
             classification=classification,
             useful=bool((parsed or {}).get("useful", False)),
             reasoning=str((parsed or {}).get("reasoning", "")).strip(),
-            render_path=str((parsed or {}).get("render_path", "browser_use_native")),
+            render_path=_normalize_render_path((parsed or {}).get("render_path")),
             data_on_site=bool((parsed or {}).get("data_on_site", False)),
             api_detected=bool((parsed or {}).get("api_detected", False)),
             api_accessible_guess=bool((parsed or {}).get("api_accessible_guess", False)),
@@ -503,12 +510,36 @@ def _coerce_source_evidence(value: Any) -> list[SourceEvidenceItem]:
         return []
     items: list[SourceEvidenceItem] = []
     for raw in value:
-        try:
-            items.append(SourceEvidenceItem.model_validate(raw))
-        except Exception:
-            if isinstance(raw, str) and raw.strip():
-                items.append(SourceEvidenceItem(kind="browser_finding", url="", summary=raw.strip()[:800]))
+        coerced = _coerce_source_evidence_item(raw)
+        if coerced is not None:
+            items.append(coerced)
     return items
+
+
+def _coerce_source_evidence_item(value: Any) -> SourceEvidenceItem | None:
+    if isinstance(value, SourceEvidenceItem):
+        return value
+    if isinstance(value, dict):
+        try:
+            return SourceEvidenceItem.model_validate(value)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.startswith(("http://", "https://")):
+            return SourceEvidenceItem(kind="page", url=raw)
+        return SourceEvidenceItem(kind="browser_finding", url="", summary=raw[:800])
+    return None
+
+
+def _normalize_render_path(value: Any) -> str:
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        return " -> ".join(parts) if parts else "browser_use_native"
+    text = str(value or "").strip()
+    return text or "browser_use_native"
 
 
 def _exception_to_text(exc: Exception) -> str:

@@ -113,6 +113,40 @@ class _BrowserUseAgent:
         return _History()
 
 
+class _HistoryAliasShape:
+    def final_result(self):
+        return (
+            '{"classification":"not_useful","useful":false,'
+            '"reasoning":"No relevant data here.",'
+            '"render_path":["https://example.com/start","https://example.com/about"],'
+            '"source_evidence":["https://example.com/about"],'
+            '"confidence":0.5}'
+        )
+
+    def is_successful(self):
+        return True
+
+    def action_history(self):
+        return []
+
+    def urls(self):
+        return ["https://example.com/start"]
+
+    def errors(self):
+        return []
+
+    def extracted_content(self):
+        return []
+
+
+class _BrowserUseAgentAliasShape:
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    async def run(self, max_steps: int):
+        return _HistoryAliasShape()
+
+
 def test_browser_delegate_uses_planner_and_native_browser_use(monkeypatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
     captured: dict[str, object] = {}
@@ -159,3 +193,33 @@ def test_browser_delegate_uses_planner_and_native_browser_use(monkeypatch, tmp_p
     assert "https://example.com/openapi.json" in result.relevant_links
     assert result.recipe[0].action == "navigate"
     assert result.recipe[1].action == "click"
+
+
+def test_browser_delegate_normalizes_browser_output_shapes(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    monkeypatch.setattr(
+        "internet_explorer.browser_delegate.load_eu_swarm_modules",
+        lambda config: {
+            "AzureOpenAIProvider": _AzureOpenAIProvider,
+            "create_agent": lambda **kwargs: _PlannerAgent({}),
+            "SmartScraperPlan": _SmartScraperPlan,
+            "BrowserUseAgent": _BrowserUseAgentAliasShape,
+            "BrowserUseBrowser": _Browser,
+            "get_browser_use_llm_by_name": lambda name: object(),
+        },
+    )
+
+    manager = BrowserDelegationManager(config, _TelemetryStub(), lambda update: None)
+    result = manager._run_delegate_sync(
+        "session_alias",
+        "https://example.com/start",
+        "find procurement api docs",
+        "url_alias",
+        ["https://example.com/about"],
+    )
+
+    assert result.classification == "irrelevant"
+    assert result.render_path == "https://example.com/start -> https://example.com/about"
+    assert result.source_evidence[0].kind == "page"
+    assert result.source_evidence[0].url == "https://example.com/about"
