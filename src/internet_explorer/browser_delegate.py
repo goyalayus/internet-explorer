@@ -376,7 +376,7 @@ class BrowserDelegationManager:
         if not relevant_links:
             relevant_links = urls[:20]
         evidence_snippets = _coerce_string_list((parsed or {}).get("evidence_snippets")) or extracted[:10]
-        confidence = float((parsed or {}).get("confidence", 0.0) or (0.8 if native_result.get("is_successful") else 0.4))
+        confidence = _coerce_confidence((parsed or {}).get("confidence"), succeeded=bool(native_result.get("is_successful")))
 
         source_evidence = _coerce_source_evidence((parsed or {}).get("source_evidence"))
         if not source_evidence:
@@ -503,6 +503,22 @@ def _coerce_string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _coerce_confidence(value: Any, *, succeeded: bool) -> float:
+    if value is None or value == "":
+        return 0.8 if succeeded else 0.4
+    try:
+        return max(0.0, min(float(value), 1.0))
+    except Exception:
+        lowered = str(value).strip().lower()
+        if lowered in {"high", "very high"}:
+            return 0.9 if succeeded else 0.7
+        if lowered in {"medium", "moderate"}:
+            return 0.6 if succeeded else 0.4
+        if lowered in {"low", "very low"}:
+            return 0.3 if succeeded else 0.1
+        return 0.8 if succeeded else 0.4
 
 
 def _coerce_source_evidence(value: Any) -> list[SourceEvidenceItem]:

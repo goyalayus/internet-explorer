@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
+from pathlib import PurePosixPath
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
@@ -181,10 +182,10 @@ class ApiProbeService:
 
     def _pick_probe_url(self, api_signal: ApiSignal) -> str:
         for link in api_signal.openapi_links:
-            if link:
+            if link and not _looks_like_document_url(link):
                 return link
         for link in api_signal.doc_links:
-            if link:
+            if link and not _looks_like_document_url(link):
                 return link
         if api_signal.graphql_hints:
             return api_signal.graphql_hints[0]
@@ -222,7 +223,8 @@ class ApiProbeService:
         body = body[:4000]
         content_type = self._guess_content_type(url, body)
         status_code = self._extract_status_code(headers)
-        success = returncode == 0
+        expected_pipe_close = returncode == 23 and "| head" in shell_command and bool(stdout.strip())
+        success = returncode == 0 or expected_pipe_close
         accessible = success and bool(body.strip()) and status_code not in {401, 403}
         relevant_guess = accessible and self._looks_machine_readable(body)
         viable_guess = relevant_guess and status_code not in {429}
@@ -240,7 +242,7 @@ class ApiProbeService:
             planner_reason=planner_reason,
             planner_fallback_used=planner_fallback_used,
             response_excerpt=body[:1200],
-            error=stderr[:1200],
+            error="" if expected_pipe_close else stderr[:1200],
         )
 
     def _split_headers_and_body(self, stdout: str) -> tuple[str, str]:
@@ -291,3 +293,12 @@ class ApiProbeService:
             return True
         lowered = stripped[:800].lower()
         return "openapi" in lowered or "swagger" in lowered or "graphql" in lowered
+
+
+def _looks_like_document_url(url: str) -> bool:
+    parsed = urlparse(url)
+    suffix = PurePosixPath(parsed.path.lower()).suffix
+    if suffix in {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".zip", ".csv"}:
+        return True
+    lowered = url.lower()
+    return any(token in lowered for token in ("/download/", "download=", "bitstreams/", "/content"))

@@ -190,6 +190,8 @@ def _normalize_payload_for_schema(payload: Any, *, schema: type[BaseModel]) -> A
     if isinstance(payload, dict):
         return payload
     if isinstance(payload, list):
+        if len(payload) == 1 and isinstance(payload[0], dict):
+            return payload[0]
         fields = list(schema.model_fields.keys())
         if len(fields) == 1:
             return {fields[0]: payload}

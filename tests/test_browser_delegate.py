@@ -120,7 +120,7 @@ class _HistoryAliasShape:
             '"reasoning":"No relevant data here.",'
             '"render_path":["https://example.com/start","https://example.com/about"],'
             '"source_evidence":["https://example.com/about"],'
-            '"confidence":0.5}'
+            '"confidence":"high"}'
         )
 
     def is_successful(self):
@@ -223,3 +223,4 @@ def test_browser_delegate_normalizes_browser_output_shapes(monkeypatch, tmp_path
     assert result.render_path == "https://example.com/start -> https://example.com/about"
     assert result.source_evidence[0].kind == "page"
     assert result.source_evidence[0].url == "https://example.com/about"
+    assert result.confidence == 0.9

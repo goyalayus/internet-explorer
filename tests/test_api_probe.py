@@ -83,3 +83,36 @@ def test_validate_shell_command_rejects_control_operators() -> None:
         assert "forbidden" in str(exc)
     else:
         raise AssertionError("expected command validation to fail")
+
+
+def test_pick_probe_url_skips_document_links() -> None:
+    service = ApiProbeService(_TelemetryStub(), _LLMStub())
+    signal = ApiSignal(
+        detected=True,
+        doc_links=[
+            "https://example.com/docs/api-guide.pdf",
+            "https://example.com/developers/reference",
+        ],
+        openapi_links=["https://example.com/openapi-spec.pdf"],
+    )
+
+    assert service._pick_probe_url(signal) == "https://example.com/developers/reference"
+
+
+def test_probe_result_treats_head_pipe_close_as_success() -> None:
+    service = ApiProbeService(_TelemetryStub(), _LLMStub())
+    stdout = "HTTP/1.1 200 OK\nContent-Type: application/json\n\n{\"openapi\":\"3.0.0\"}"
+    result = service._to_probe_result(
+        "https://example.com/openapi.json",
+        ["bash", "-lc", "curl -sS https://example.com/openapi.json | head -c 8000"],
+        "curl -sS https://example.com/openapi.json | head -c 8000",
+        "fallback",
+        True,
+        23,
+        stdout,
+        "curl: (23) Failure writing output to destination\n",
+    )
+
+    assert result.success is True
+    assert result.accessible is True
+    assert result.error == ""
