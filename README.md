@@ -38,6 +38,18 @@ Or use the console entrypoint:
 internet-explorer --intent "your intent here"
 ```
 
+Before the first run on a machine, bring runtime dependencies up with one command:
+
+```bash
+./scripts/runtime_up.sh
+```
+
+That command:
+- resolves a sane local `VPN_OVPN_CONFIG`
+- fills `VPN_DOCDB_HOST` from `MONGODB_URI` when needed
+- starts VPN
+- verifies Mongo reachability
+
 Export a readable post-run path report from Mongo:
 
 ```bash
@@ -59,6 +71,7 @@ Start from `.env.example`.
 Important behavior:
 - Config is loaded from this repo's environment (`.env` + process env overrides).
 - `MONGODB_URI` must be set in this repo config.
+- `MONGODB_TLS_CA_FILE` defaults to `certs/global-bundle.pem` when that file exists, so Mongo TLS does not need a hardcoded external path inside `MONGODB_URI`.
 - `MAX_BROWSER_CONCURRENCY=0` means unlimited.
 - `MAX_URL_CONCURRENCY=0` means unlimited.
 - `CANDIDATE_START_MODE=domain_homepage` means one candidate per unique domain and the normal agent starts from the domain homepage.
@@ -66,8 +79,9 @@ Important behavior:
 - `MAX_SITE_GRAPH_FRONTIER` controls how many initial seeded links are passed into browser delegation.
 - `PDF_INLINE_MAX_BYTES` limits direct inline Gemini PDF verification size.
 - `KNOWN_TOOLS_FILE` provides the static duplicate-tool baseline.
-- `VPN_OVPN_CONFIG` points to your OpenVPN config path.
+- `VPN_OVPN_CONFIG` points to your OpenVPN config path. `./scripts/runtime_up.sh` can resolve and write this automatically.
 - `VPN_DEFAULTS_FILE` provides local fallback defaults for DocDB host/port and split tunnel preference.
+- `VPN_DOCDB_HOST` can be left blank; it is derived from `MONGODB_URI` when missing.
 
 ## Notes
 

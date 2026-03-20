@@ -147,7 +147,10 @@ class GenericVpnManager:
 
     def _require_ovpn_config(self) -> Path:
         if self.config.vpn_ovpn_config is None or not self.config.vpn_ovpn_config.exists():
-            raise RuntimeError("No OVPN config found. Set VPN_OVPN_CONFIG.")
+            raise RuntimeError(
+                "No OVPN config found. Set VPN_OVPN_CONFIG or place client-config-staging.ovpn "
+                "in vpn/, the repo root, or a sibling query optimizer checkout."
+            )
         return self.config.vpn_ovpn_config
 
     def _ensure_base_dependencies(self) -> None:

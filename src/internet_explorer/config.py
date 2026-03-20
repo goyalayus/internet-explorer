@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 from pydantic import BaseModel, field_validator
@@ -19,10 +20,62 @@ def _parse_shell_default(script_path: Path | None, variable_name: str) -> str | 
     return match.group(1).strip()
 
 
+def _derive_docdb_endpoint_from_mongodb_uri(uri: str) -> tuple[str, int | None]:
+    raw_uri = (uri or "").strip()
+    if not raw_uri:
+        return "", None
+
+    try:
+        parsed = urlsplit(raw_uri)
+    except Exception:
+        return "", None
+
+    host = parsed.hostname or ""
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    return host, port
+
+
+def _candidate_ovpn_paths(root_dir: Path, configured_path: str = "", legacy_path: str = "") -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    raw_candidates = [
+        configured_path,
+        str(root_dir / "vpn/client-config-staging.ovpn"),
+        str(root_dir / "client-config-staging.ovpn"),
+        legacy_path,
+        str(root_dir.parent / "query_optimizer_repo/client-config-staging.ovpn"),
+        str(root_dir.parent / "query-optimzer/client-config-staging.ovpn"),
+        str(root_dir.parent / "query_optimizer/client-config-staging.ovpn"),
+    ]
+
+    for raw_path in raw_candidates:
+        cleaned = (raw_path or "").strip()
+        if not cleaned:
+            continue
+        path = Path(cleaned).expanduser().resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        candidates.append(path)
+
+    return candidates
+
+
+def _resolve_ovpn_config_path(root_dir: Path, configured_path: str = "", legacy_path: str = "") -> Path | None:
+    for path in _candidate_ovpn_paths(root_dir, configured_path, legacy_path):
+        if path.exists():
+            return path
+    return None
+
+
 class AppConfig(BaseModel):
     workspace_root: Path
     intent: str = ""
     mongodb_uri: str
+    mongodb_tls_ca_file: Path | None = None
     mongodb_db: str = "web_crawler"
     mongodb_runs_collection: str = "ie_runs"
     mongodb_url_summaries_collection: str = "ie_url_summaries"
@@ -92,7 +145,7 @@ class AppConfig(BaseModel):
     def _expand_required_path(cls, value: Path) -> Path:
         return value.expanduser().resolve()
 
-    @field_validator("eu_swarm_path", "vpn_start_script", "vpn_ovpn_config", "vpn_defaults_file")
+    @field_validator("eu_swarm_path", "mongodb_tls_ca_file", "vpn_start_script", "vpn_ovpn_config", "vpn_defaults_file")
     @classmethod
     def _expand_optional_path(cls, value: Path | None) -> Path | None:
         if value is None:
@@ -122,17 +175,32 @@ class AppConfig(BaseModel):
         if vpn_start_script and not vpn_start_script.exists():
             vpn_start_script = None
 
-        vpn_ovpn_raw = env_value("VPN_OVPN_CONFIG") or env_value("QUERY_OPTIMIZER_OVPN_CONFIG")
-        if vpn_ovpn_raw:
-            vpn_ovpn_config = Path(vpn_ovpn_raw).expanduser().resolve()
-        else:
-            default_ovpn = (root_dir / "vpn/client-config-staging.ovpn").resolve()
-            vpn_ovpn_config = default_ovpn if default_ovpn.exists() else None
-        if vpn_ovpn_config and not vpn_ovpn_config.exists():
-            vpn_ovpn_config = None
+        mongo_uri = env_value("MONGODB_URI")
+        if not mongo_uri:
+            raise ValueError("MONGODB_URI is required in this repository env/config.")
+        derived_docdb_host, derived_docdb_port = _derive_docdb_endpoint_from_mongodb_uri(mongo_uri)
 
-        vpn_docdb_host = env_value("VPN_DOCDB_HOST") or _parse_shell_default(vpn_defaults_file, "DOCDB_HOST") or ""
-        vpn_docdb_port = int(env_value("VPN_DOCDB_PORT", _parse_shell_default(vpn_defaults_file, "DOCDB_PORT") or "27017"))
+        configured_ovpn_path = env_value("VPN_OVPN_CONFIG")
+        legacy_ovpn_path = env_value("QUERY_OPTIMIZER_OVPN_CONFIG")
+        vpn_ovpn_config = _resolve_ovpn_config_path(
+            root_dir,
+            configured_path=configured_ovpn_path,
+            legacy_path=legacy_ovpn_path,
+        )
+
+        vpn_docdb_host = (
+            env_value("VPN_DOCDB_HOST")
+            or _parse_shell_default(vpn_defaults_file, "DOCDB_HOST")
+            or derived_docdb_host
+            or ""
+        )
+        vpn_docdb_port = int(
+            env_value(
+                "VPN_DOCDB_PORT",
+                _parse_shell_default(vpn_defaults_file, "DOCDB_PORT")
+                or str(derived_docdb_port or 27017),
+            )
+        )
         vpn_require_split_tunnel = env_value(
             "VPN_REQUIRE_SPLIT_TUNNEL",
             (_parse_shell_default(vpn_defaults_file, "REQUIRE_SPLIT_TUNNEL") or "true"),
@@ -140,14 +208,20 @@ class AppConfig(BaseModel):
         vpn_require_docdb_reachable = env_value("VPN_REQUIRE_DOCDB_REACHABLE", "true").lower() == "true"
         vpn_log_dir = Path(env_value("VPN_LOG_DIR", str(root_dir / ".vpn_logs")))
 
-        mongo_uri = env_value("MONGODB_URI")
-        if not mongo_uri:
-            raise ValueError("MONGODB_URI is required in this repository env/config.")
+        mongodb_tls_ca_raw = env_value("MONGODB_TLS_CA_FILE")
+        if mongodb_tls_ca_raw:
+            mongodb_tls_ca_file = Path(mongodb_tls_ca_raw).expanduser().resolve()
+        else:
+            default_tls_ca = (root_dir / "certs/global-bundle.pem").resolve()
+            mongodb_tls_ca_file = default_tls_ca if default_tls_ca.exists() else None
+        if mongodb_tls_ca_file and not mongodb_tls_ca_file.exists():
+            mongodb_tls_ca_file = None
 
         return cls(
             workspace_root=root_dir,
             intent=env_value("INTENT"),
             mongodb_uri=mongo_uri,
+            mongodb_tls_ca_file=mongodb_tls_ca_file,
             mongodb_db=env_value("MONGODB_DB", "web_crawler"),
             mongodb_runs_collection=env_value("MONGODB_RUNS_COLLECTION", "ie_runs"),
             mongodb_url_summaries_collection=env_value("MONGODB_URL_SUMMARIES_COLLECTION", "ie_url_summaries"),

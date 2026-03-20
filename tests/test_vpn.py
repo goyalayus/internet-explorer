@@ -60,3 +60,27 @@ def test_vpn_manager_uses_local_start_script_when_configured(monkeypatch, tmp_pa
     manager.start()
     command = captured.get("command", [])
     assert command[:2] == ["bash", str(start_script)]
+
+
+def test_app_config_derives_docdb_host_and_resolves_local_ovpn(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "MONGODB_URI=mongodb://user:pass@docdb.example.internal:27018/?tls=true\n"
+        "QUERY_OPTIMIZER_OVPN_CONFIG=/home/ubuntu/code/query_optimizer_repo/client-config-staging.ovpn\n"
+        "VPN_DOCDB_HOST=\n"
+        "VPN_DOCDB_PORT=\n"
+    )
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("")
+    known_tools = tmp_path / "known_tools.txt"
+    known_tools.write_text("rapidapi\n")
+    query_optimizer_repo = tmp_path.parent / "query_optimizer_repo"
+    query_optimizer_repo.mkdir(exist_ok=True)
+    ovpn = query_optimizer_repo / "client-config-staging.ovpn"
+    ovpn.write_text("client\n")
+
+    config = AppConfig.from_env(tmp_path)
+
+    assert config.vpn_docdb_host == "docdb.example.internal"
+    assert config.vpn_docdb_port == 27018
+    assert config.vpn_ovpn_config == ovpn.resolve()
