@@ -25,8 +25,23 @@ def test_tool_inventory_loads_from_local_static_file(tmp_path: Path) -> None:
 def test_tool_inventory_matches_alias_terms() -> None:
     inventory = ToolInventory(["coresignal", "builtwith", "rapidapi"])
 
-    match = inventory.match_terms(["Core Signal", "linkedin company profile"])
+    match = inventory.match_terms(["Core Signal", "Rapid API marketplace"])
 
     assert match.duplicate_detected is True
     assert "coresignal" in match.matched_tools
     assert "rapidapi" in match.matched_tools
+
+
+def test_tool_inventory_ignores_generic_overlap_terms() -> None:
+    inventory = ToolInventory(["builtwith", "rapidapi", "peopledatalabs"])
+
+    match = inventory.match_terms(
+        [
+            "vendor registration - partner with haidata | ai data services",
+            "dataset",
+            "linkedin company profile",
+        ]
+    )
+
+    assert match.duplicate_detected is False
+    assert match.matched_tools == []
