@@ -182,3 +182,56 @@ def test_vpn_manager_stop_does_not_kill_non_openvpn_pid(monkeypatch, tmp_path: P
     assert status.running is False
     assert status.message == "already stopped"
     assert kill_commands == []
+
+
+def test_vpn_manager_stop_kills_openvpn_and_waits_for_process_exit(monkeypatch, tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("")
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("")
+    known_tools = tmp_path / "known_tools.txt"
+    known_tools.write_text("rapidapi\n")
+    ovpn = tmp_path / "client.ovpn"
+    ovpn.write_text("client\n")
+
+    config = AppConfig(
+        workspace_root=tmp_path,
+        mongodb_uri="mongodb://localhost:27017",
+        baseline_domains_file=baseline,
+        known_tools_file=known_tools,
+        vpn_log_dir=tmp_path / ".vpn_logs",
+        env_file_path=env_path,
+        vpn_ovpn_config=ovpn,
+    )
+    manager = GenericVpnManager(config)
+
+    kill_commands: list[list[str]] = []
+    process_states = iter([True, False])
+
+    def _fake_run(command, capture_output=True, text=True, check=True):  # noqa: ANN001
+        if command[:2] == ["sudo", "kill"]:
+            kill_commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(manager, "_ensure_base_dependencies", lambda: None)
+    monkeypatch.setattr(manager, "_read_active_openvpn_pid", lambda: 123)
+    monkeypatch.setattr(manager, "_process_exists", lambda pid: next(process_states))
+    monkeypatch.setattr(manager, "_remove_stale_pid_file", lambda: None)
+    monkeypatch.setattr(
+        manager,
+        "status",
+        lambda check_docdb=False: VpnStatus(
+            running=False,
+            pid=None,
+            pid_file=str(manager.pid_file),
+            log_file=str(manager.log_file),
+            message="stopped",
+        ),
+    )
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    status = manager.stop()
+
+    assert status.running is False
+    assert status.message == "stopped"
+    assert kill_commands == [["sudo", "kill", "123"]]

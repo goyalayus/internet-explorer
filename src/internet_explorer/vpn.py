@@ -137,7 +137,7 @@ class GenericVpnManager:
 
         subprocess.run(["sudo", "kill", str(pid)], check=True, capture_output=True, text=True)
         for _ in range(20):
-            if not self._pid_is_running(pid):
+            if not self._process_exists(pid):
                 break
             time.sleep(0.5)
         self._remove_stale_pid_file()
