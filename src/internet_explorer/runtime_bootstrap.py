@@ -11,6 +11,7 @@ from internet_explorer.config import AppConfig
 from internet_explorer.config import _candidate_ovpn_paths
 from internet_explorer.config import _derive_docdb_endpoint_from_mongodb_uri
 from internet_explorer.config import _resolve_ovpn_config_path
+from internet_explorer.persistence import _strip_tls_ca_file_from_uri
 from internet_explorer.persistence import ping_mongo
 from internet_explorer.vpn import GenericVpnManager
 
@@ -64,6 +65,10 @@ def _resolve_env_path(root_dir: Path, raw_path: str) -> Path | None:
 
 def build_runtime_env_updates(root_dir: Path, env_values: dict[str, str], explicit_ovpn: str = "") -> dict[str, str]:
     updates: dict[str, str] = {}
+    current_mongo_uri = str(env_values.get("MONGODB_URI") or "").strip()
+    cleaned_mongo_uri = _strip_tls_ca_file_from_uri(current_mongo_uri)
+    if cleaned_mongo_uri and cleaned_mongo_uri != current_mongo_uri:
+        updates["MONGODB_URI"] = cleaned_mongo_uri
 
     resolved_ovpn = _resolve_ovpn_config_path(
         root_dir,

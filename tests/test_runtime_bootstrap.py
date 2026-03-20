@@ -60,6 +60,23 @@ def test_build_runtime_env_updates_sets_repo_local_tls_ca_when_missing(tmp_path:
     assert updates["MONGODB_TLS_CA_FILE"] == "certs/global-bundle.pem"
 
 
+def test_build_runtime_env_updates_strips_tls_ca_from_mongodb_uri(tmp_path: Path) -> None:
+    root_dir = tmp_path / "internet-explorer"
+    root_dir.mkdir()
+
+    updates = build_runtime_env_updates(
+        root_dir,
+        {
+            "MONGODB_URI": (
+                "mongodb://user:pass@docdb.example.internal:27017/"
+                "?directConnection=true&tls=true&tlsCAFile=/tmp/stale.pem"
+            ),
+        },
+    )
+
+    assert "tlsCAFile=" not in updates["MONGODB_URI"]
+
+
 def test_apply_env_updates_rewrites_existing_keys_and_appends_missing(tmp_path: Path) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text(
