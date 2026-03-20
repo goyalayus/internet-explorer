@@ -230,6 +230,27 @@ async def test_evaluator_marks_duplicate_tool_sources(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_evaluator_seeds_tool_terms_when_llm_returns_empty_terms(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    evaluator = UrlEvaluator(
+        config,
+        _LLMStub(tool_terms=[]),
+        _FetcherStub(_responses()),
+        _TelemetryStub(),
+        _BrowserManagerStub(),
+        tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
+    )
+    candidate = _candidate("url_seeded", title="RapidAPI Marketplace Listing")
+
+    evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
+
+    assert evaluation.tool_duplicate_signal.checked is True
+    assert evaluation.tool_duplicate_signal.search_terms
+    assert "rapidapi" in evaluation.tool_duplicate_signal.matched_tools
+    assert evaluation.tool_duplicate_signal.duplicate_detected is True
+
+
+@pytest.mark.asyncio
 async def test_evaluator_normalizes_verdict_shape(tmp_path: Path) -> None:
     config = _config(tmp_path)
     evaluator = UrlEvaluator(

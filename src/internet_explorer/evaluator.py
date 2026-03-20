@@ -99,6 +99,23 @@ VALID_OUTCOMES = {
 }
 VALID_API_STAGES = {"none", "api_detected", "api_accessible", "api_relevant", "api_viable"}
 VALID_NAV_ACTIONS = {"fetch_url", "read_node", "delegate_browser", "stop"}
+GENERIC_TOOL_IDENTITY_TERMS = {
+    "api",
+    "apis",
+    "data",
+    "docs",
+    "documentation",
+    "developer",
+    "developers",
+    "platform",
+    "portal",
+    "service",
+    "services",
+    "home",
+    "homepage",
+    "contact",
+    "pricing",
+}
 
 
 class UrlEvaluator:
@@ -877,11 +894,18 @@ class UrlEvaluator:
                 temperature=0.0,
                 max_completion_tokens=300,
             )
-            terms = response.terms[:8]
+            terms = _normalize_tool_terms(response.terms)
             reason = response.reason.strip()
         except Exception as exc:
-            terms = [candidate.domain, candidate.source_title]
+            terms = []
             reason = f"fallback:{type(exc).__name__}"
+
+        seed_terms = _seed_tool_identity_terms(candidate=candidate, page_evidence=page_evidence)
+        if not _has_meaningful_tool_terms(terms):
+            terms = seed_terms
+            reason = f"{reason}|seeded_terms" if reason else "fallback:empty_terms|seeded_terms"
+        else:
+            terms = _merge_tool_terms(terms, seed_terms)[:8]
 
         match = self.tool_inventory.match_terms(terms)
         signal = ToolDuplicateSignal(
@@ -964,6 +988,57 @@ def _unique_links(links: list[str]) -> list[str]:
         seen.add(link)
         unique.append(link)
     return unique
+
+
+def _normalize_tool_terms(raw_terms: list[str]) -> list[str]:
+    terms: list[str] = []
+    for raw_term in raw_terms:
+        term = str(raw_term or "").strip()
+        if not term:
+            continue
+        if term.lower() in GENERIC_TOOL_IDENTITY_TERMS:
+            continue
+        terms.append(term)
+    return _merge_tool_terms(terms, [])[:8]
+
+
+def _seed_tool_identity_terms(*, candidate: UrlCandidate, page_evidence: list[PageEvidence]) -> list[str]:
+    terms: list[str] = []
+    terms.append(candidate.domain)
+    terms.append(candidate.source_title)
+    terms.append(candidate.source_snippet)
+
+    for evidence in page_evidence[:3]:
+        terms.append(evidence.title)
+        terms.extend(evidence.data_signals[:3])
+
+    return _merge_tool_terms(terms, [])[:8]
+
+
+def _has_meaningful_tool_terms(terms: list[str]) -> bool:
+    for term in terms:
+        normalized = str(term or "").strip().lower()
+        if not normalized:
+            continue
+        if normalized in GENERIC_TOOL_IDENTITY_TERMS:
+            continue
+        return True
+    return False
+
+
+def _merge_tool_terms(primary: list[str], secondary: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for raw_term in [*primary, *secondary]:
+        term = str(raw_term or "").strip()
+        if not term:
+            continue
+        lowered = term.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        merged.append(term)
+    return merged
 
 
 def _normalize_decision_response(
