@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 from internet_explorer.config import AppConfig
 from internet_explorer.config import _parse_shell_default
@@ -84,3 +85,100 @@ def test_app_config_derives_docdb_host_and_resolves_local_ovpn(tmp_path: Path) -
     assert config.vpn_docdb_host == "docdb.example.internal"
     assert config.vpn_docdb_port == 27018
     assert config.vpn_ovpn_config == ovpn.resolve()
+
+
+def test_app_config_prefers_repo_env_values_over_stale_process_env(monkeypatch, tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "MONGODB_URI=mongodb://user:pass@docdb.example.internal:27018/?tls=true\n"
+        "GOOGLE_API_KEY=repo-key\n"
+    )
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("")
+    known_tools = tmp_path / "known_tools.txt"
+    known_tools.write_text("rapidapi\n")
+
+    monkeypatch.setenv("MONGODB_URI", "mongodb://stale-process-value:27017")
+    monkeypatch.setenv("GOOGLE_API_KEY", "stale-process-key")
+
+    config = AppConfig.from_env(tmp_path)
+
+    assert config.mongodb_uri == "mongodb://user:pass@docdb.example.internal:27018/?tls=true"
+    assert config.google_api_key == "repo-key"
+
+
+def test_vpn_manager_status_clears_stale_pid_for_non_openvpn_process(monkeypatch, tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("")
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("")
+    known_tools = tmp_path / "known_tools.txt"
+    known_tools.write_text("rapidapi\n")
+    ovpn = tmp_path / "client.ovpn"
+    ovpn.write_text("client\n")
+
+    config = AppConfig(
+        workspace_root=tmp_path,
+        mongodb_uri="mongodb://localhost:27017",
+        baseline_domains_file=baseline,
+        known_tools_file=known_tools,
+        vpn_log_dir=tmp_path / ".vpn_logs",
+        env_file_path=env_path,
+        vpn_ovpn_config=ovpn,
+    )
+    manager = GenericVpnManager(config)
+    manager.log_dir.mkdir(parents=True, exist_ok=True)
+    manager.pid_file.write_text("123")
+
+    monkeypatch.setattr(manager, "_process_is_openvpn", lambda pid: False)
+    monkeypatch.setattr(manager, "_list_tunnel_interfaces", lambda: [])
+    monkeypatch.setattr(manager, "_default_route", lambda: "default via 1.1.1.1 dev eth0")
+
+    status = manager.status()
+
+    assert status.running is False
+    assert status.pid is None
+    assert manager.pid_file.exists() is False
+
+
+def test_vpn_manager_stop_does_not_kill_non_openvpn_pid(monkeypatch, tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("")
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("")
+    known_tools = tmp_path / "known_tools.txt"
+    known_tools.write_text("rapidapi\n")
+    ovpn = tmp_path / "client.ovpn"
+    ovpn.write_text("client\n")
+
+    config = AppConfig(
+        workspace_root=tmp_path,
+        mongodb_uri="mongodb://localhost:27017",
+        baseline_domains_file=baseline,
+        known_tools_file=known_tools,
+        vpn_log_dir=tmp_path / ".vpn_logs",
+        env_file_path=env_path,
+        vpn_ovpn_config=ovpn,
+    )
+    manager = GenericVpnManager(config)
+    manager.log_dir.mkdir(parents=True, exist_ok=True)
+    manager.pid_file.write_text("123")
+
+    kill_commands: list[list[str]] = []
+
+    def _fake_run(command, capture_output=True, text=True, check=True):  # noqa: ANN001
+        if command[:2] == ["sudo", "kill"]:
+            kill_commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(manager, "_ensure_base_dependencies", lambda: None)
+    monkeypatch.setattr(manager, "_process_is_openvpn", lambda pid: False)
+    monkeypatch.setattr(manager, "_list_tunnel_interfaces", lambda: [])
+    monkeypatch.setattr(manager, "_default_route", lambda: "default via 1.1.1.1 dev eth0")
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    status = manager.stop()
+
+    assert status.running is False
+    assert status.message == "already stopped"
+    assert kill_commands == []

@@ -37,8 +37,8 @@ class GenericVpnManager:
         self.log_file = self.log_dir / "openvpn.log"
 
     def status(self, *, check_docdb: bool = False) -> VpnStatus:
-        pid = self._read_pid()
-        running = pid is not None and self._pid_is_running(pid)
+        pid = self._read_active_openvpn_pid()
+        running = pid is not None
         tunnel_interfaces = self._list_tunnel_interfaces()
         default_route = self._default_route()
         docdb_reachable = self._check_docdb() if check_docdb and self.config.vpn_docdb_host else None
@@ -128,8 +128,8 @@ class GenericVpnManager:
 
     def stop(self) -> VpnStatus:
         self._ensure_base_dependencies()
-        pid = self._read_pid()
-        if pid is None or not self._pid_is_running(pid):
+        pid = self._read_active_openvpn_pid()
+        if pid is None:
             self._remove_stale_pid_file()
             status = self.status(check_docdb=False)
             status.message = "already stopped"
@@ -170,8 +170,8 @@ class GenericVpnManager:
     def _wait_for_pid_and_tunnel(self) -> None:
         deadline = time.time() + 30
         while time.time() < deadline:
-            pid = self._read_pid()
-            if pid and self._pid_is_running(pid) and self._list_tunnel_interfaces():
+            pid = self._read_active_openvpn_pid()
+            if pid and self._list_tunnel_interfaces():
                 return
             time.sleep(1)
         log_tail = self._tail_log()
@@ -196,10 +196,25 @@ class GenericVpnManager:
 
     def _remove_stale_pid_file(self) -> None:
         pid = self._read_pid()
-        if pid is None or not self._pid_is_running(pid):
+        if pid is None:
+            self.pid_file.unlink(missing_ok=True)
+            return
+
+        if not self._process_is_openvpn(pid):
             self.pid_file.unlink(missing_ok=True)
 
-    def _pid_is_running(self, pid: int) -> bool:
+    def _read_active_openvpn_pid(self) -> int | None:
+        pid = self._read_pid()
+        if pid is None:
+            return None
+
+        if self._process_is_openvpn(pid):
+            return pid
+
+        self.pid_file.unlink(missing_ok=True)
+        return None
+
+    def _process_exists(self, pid: int) -> bool:
         try:
             os.kill(pid, 0)
         except PermissionError:
@@ -207,6 +222,25 @@ class GenericVpnManager:
         except OSError:
             return False
         return True
+
+    def _process_is_openvpn(self, pid: int) -> bool:
+        if not self._process_exists(pid):
+            return False
+
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return False
+
+        process_name = result.stdout.strip().lower()
+        if not process_name:
+            return False
+
+        return "openvpn" in process_name
 
     def _list_tunnel_interfaces(self) -> list[str]:
         result = subprocess.run(["ip", "-o", "link", "show"], capture_output=True, text=True, check=True)

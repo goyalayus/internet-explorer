@@ -9,6 +9,16 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, field_validator
 
 
+def _normalize_env_values(raw_values: dict[str, object] | None) -> dict[str, str]:
+    if not raw_values:
+        return {}
+
+    normalized: dict[str, str] = {}
+    for key, value in raw_values.items():
+        normalized[str(key)] = str(value or "")
+    return normalized
+
+
 def _parse_shell_default(script_path: Path | None, variable_name: str) -> str | None:
     if script_path is None or not script_path.exists():
         return None
@@ -153,13 +163,34 @@ class AppConfig(BaseModel):
         return value.expanduser().resolve()
 
     @classmethod
-    def from_env(cls, root: Path | None = None) -> "AppConfig":
+    def from_env(
+        cls,
+        root: Path | None = None,
+        *,
+        env_overrides: dict[str, object] | None = None,
+        prefer_process_env: bool = False,
+    ) -> "AppConfig":
         root_dir = (root or Path.cwd()).resolve()
         env_file_path = (root_dir / ".env").resolve()
-        local_env = dotenv_values(env_file_path) if env_file_path.exists() else {}
+        local_env = _normalize_env_values(dotenv_values(env_file_path) if env_file_path.exists() else {})
+        local_env.update(_normalize_env_values(env_overrides))
 
         def env_value(name: str, default: str = "") -> str:
-            return (os.getenv(name) or str(local_env.get(name) or default)).strip()
+            local_value = str(local_env.get(name) or "").strip()
+            process_value = str(os.getenv(name) or "").strip()
+
+            if prefer_process_env:
+                if process_value:
+                    return process_value
+                if local_value:
+                    return local_value
+                return default.strip()
+
+            if local_value:
+                return local_value
+            if process_value:
+                return process_value
+            return default.strip()
 
         eu_swarm_default = (root_dir / "../eu-swarm").resolve()
         eu_swarm_path_raw = env_value("EU_SWARM_PATH", str(eu_swarm_default))

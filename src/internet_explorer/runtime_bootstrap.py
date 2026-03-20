@@ -31,6 +31,37 @@ class RuntimeBootstrapResult(BaseModel):
     error_type: str = ""
     error: str = ""
 
+
+def _normalize_env_values(raw_values: dict[str, object] | None) -> dict[str, str]:
+    if not raw_values:
+        return {}
+
+    normalized: dict[str, str] = {}
+    for key, value in raw_values.items():
+        normalized[str(key)] = str(value or "")
+    return normalized
+
+
+def _repo_relative_path(root_dir: Path, path: Path) -> str:
+    resolved_root = root_dir.resolve()
+    resolved_path = path.resolve()
+    try:
+        return str(resolved_path.relative_to(resolved_root))
+    except ValueError:
+        return str(resolved_path)
+
+
+def _resolve_env_path(root_dir: Path, raw_path: str) -> Path | None:
+    cleaned = (raw_path or "").strip()
+    if not cleaned:
+        return None
+
+    path = Path(cleaned).expanduser()
+    if not path.is_absolute():
+        path = root_dir / path
+    return path.resolve()
+
+
 def build_runtime_env_updates(root_dir: Path, env_values: dict[str, str], explicit_ovpn: str = "") -> dict[str, str]:
     updates: dict[str, str] = {}
 
@@ -51,6 +82,12 @@ def build_runtime_env_updates(root_dir: Path, env_values: dict[str, str], explic
             updates["VPN_DOCDB_HOST"] = derived_host
     if not current_docdb_port and derived_port:
         updates["VPN_DOCDB_PORT"] = str(derived_port)
+
+    repo_tls_ca = (root_dir / "certs/global-bundle.pem").resolve()
+    current_tls_ca = str(env_values.get("MONGODB_TLS_CA_FILE") or "").strip()
+    resolved_tls_ca = _resolve_env_path(root_dir, current_tls_ca) if current_tls_ca else None
+    if repo_tls_ca.exists() and (not current_tls_ca or resolved_tls_ca is None or not resolved_tls_ca.exists()):
+        updates["MONGODB_TLS_CA_FILE"] = _repo_relative_path(root_dir, repo_tls_ca)
 
     return updates
 
@@ -97,13 +134,11 @@ def run_runtime_bootstrap(
     verify_mongo: bool = True,
 ) -> RuntimeBootstrapResult:
     env_path = (root_dir / ".env").resolve()
-    env_values = {
-        str(key): str(value or "")
-        for key, value in dotenv_values(env_path).items()
-        if key is not None
-    }
+    env_values = _normalize_env_values(dotenv_values(env_path) if env_path.exists() else {})
     env_updates = build_runtime_env_updates(root_dir, env_values, explicit_ovpn=explicit_ovpn)
     env_written = apply_env_updates(env_path, env_updates) if write_env else False
+    resolved_env_values = dict(env_values)
+    resolved_env_values.update(env_updates)
 
     result = RuntimeBootstrapResult(
         env_file=str(env_path),
@@ -120,7 +155,11 @@ def run_runtime_bootstrap(
     )
 
     try:
-        config = AppConfig.from_env(root_dir)
+        config = AppConfig.from_env(
+            root_dir,
+            env_overrides=resolved_env_values,
+            prefer_process_env=False,
+        )
         result.resolved_ovpn_config = str(config.vpn_ovpn_config) if config.vpn_ovpn_config else None
         result.resolved_docdb_host = config.vpn_docdb_host
         result.resolved_docdb_port = config.vpn_docdb_port
