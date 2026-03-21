@@ -486,6 +486,48 @@ async def test_browser_delegate_does_not_retry_timeout_errors(monkeypatch, tmp_p
     assert not any(event.get("decision") == "delegate_retry" for event in telemetry.events)
 
 
+@pytest.mark.asyncio
+async def test_browser_delegate_retries_transient_browser_start_timeout(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    telemetry = _TelemetryStub()
+
+    monkeypatch.setattr(
+        "internet_explorer.browser_delegate.load_eu_swarm_modules",
+        lambda config: {},
+    )
+
+    manager = BrowserDelegationManager(config, telemetry, lambda update: None)
+    attempts = {"count": 0}
+
+    async def _fake_run_delegate_async(**kwargs):  # noqa: ARG001
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise TimeoutError(
+                "Event handler browser_use.browser.watchdog_base.BrowserSession.on_BrowserStartEvent "
+                "timed out after 30.0s and interrupted any processing of child events"
+            )
+        return BrowserDelegateResult(
+            session_name="session_start_timeout_retry",
+            classification="data_on_site",
+            useful=True,
+            reasoning="retry succeeded after transient browser startup timeout",
+        )
+
+    monkeypatch.setattr(manager, "_run_delegate_async", _fake_run_delegate_async)
+
+    result = await manager.delegate(
+        url="https://example.com/start",
+        intent="find sources",
+        url_id="url_start_timeout_retry",
+        initial_links=[],
+    )
+
+    assert attempts["count"] == 2
+    assert result.classification == "data_on_site"
+    assert result.useful is True
+    assert any(event.get("decision") == "delegate_retry" for event in telemetry.events)
+
+
 class _SlowCloser:
     async def close(self):
         await asyncio.sleep(2)

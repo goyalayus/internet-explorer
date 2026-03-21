@@ -38,6 +38,7 @@ TRANSIENT_DELEGATE_ERROR_MARKERS = (
     "no close frame received or sent",
     "did not receive a valid http response",
     "no space left on device",
+    "browserstartevent",
 )
 MAX_TRANSIENT_DELEGATE_RETRIES = 1
 
