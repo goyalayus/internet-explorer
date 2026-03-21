@@ -7,9 +7,13 @@ from pydantic import BaseModel
 
 from internet_explorer.browser_delegate import BrowserDelegationManager, _maybe_await, _maybe_call_close
 from internet_explorer.config import AppConfig
+from internet_explorer.models import BrowserDelegateResult
 
 
 class _TelemetryStub:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
     def timed(self) -> float:
         return 0.0
 
@@ -17,7 +21,7 @@ class _TelemetryStub:
         return 0
 
     def emit(self, **kwargs) -> None:
-        return None
+        self.events.append(kwargs)
 
 
 def _config(tmp_path: Path) -> AppConfig:
@@ -355,6 +359,77 @@ def test_browser_delegate_returns_fallback_on_timeout(monkeypatch, tmp_path: Pat
     assert result.classification == "unknown"
     assert result.useful is False
     assert result.render_path == "browser_delegate_fallback"
+
+
+@pytest.mark.asyncio
+async def test_browser_delegate_retries_transient_cdp_failures(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    telemetry = _TelemetryStub()
+
+    monkeypatch.setattr(
+        "internet_explorer.browser_delegate.load_eu_swarm_modules",
+        lambda config: {},
+    )
+
+    manager = BrowserDelegationManager(config, telemetry, lambda update: None)
+    attempts = {"count": 0}
+
+    async def _fake_run_delegate_async(**kwargs):  # noqa: ARG001
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("Failed to establish CDP connection to browser: WebSocket connection closed")
+        return BrowserDelegateResult(
+            session_name="session_retry",
+            classification="data_on_site",
+            useful=True,
+            reasoning="retried and succeeded",
+        )
+
+    monkeypatch.setattr(manager, "_run_delegate_async", _fake_run_delegate_async)
+
+    result = await manager.delegate(
+        url="https://example.com/start",
+        intent="find sources",
+        url_id="url_retry",
+        initial_links=[],
+    )
+
+    assert attempts["count"] == 2
+    assert result.classification == "data_on_site"
+    assert result.useful is True
+    assert any(event.get("decision") == "delegate_retry" for event in telemetry.events)
+
+
+@pytest.mark.asyncio
+async def test_browser_delegate_does_not_retry_timeout_errors(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    telemetry = _TelemetryStub()
+
+    monkeypatch.setattr(
+        "internet_explorer.browser_delegate.load_eu_swarm_modules",
+        lambda config: {},
+    )
+
+    manager = BrowserDelegationManager(config, telemetry, lambda update: None)
+    attempts = {"count": 0}
+
+    async def _fake_run_delegate_async(**kwargs):  # noqa: ARG001
+        attempts["count"] += 1
+        raise RuntimeError("browser_delegate_timeout_after_120s")
+
+    monkeypatch.setattr(manager, "_run_delegate_async", _fake_run_delegate_async)
+
+    result = await manager.delegate(
+        url="https://example.com/start",
+        intent="find sources",
+        url_id="url_no_retry",
+        initial_links=[],
+    )
+
+    assert attempts["count"] == 1
+    assert result.classification == "unknown"
+    assert result.useful is False
+    assert not any(event.get("decision") == "delegate_retry" for event in telemetry.events)
 
 
 class _SlowCloser:

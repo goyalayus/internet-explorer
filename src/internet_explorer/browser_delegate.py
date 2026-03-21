@@ -31,6 +31,13 @@ CLASSIFICATION_ALIASES = {
     "not_relevant": "irrelevant",
     "relevant": "data_on_site",
 }
+TRANSIENT_DELEGATE_ERROR_MARKERS = (
+    "failed to establish cdp connection to browser",
+    "websocket connection closed",
+    "no close frame received or sent",
+    "did not receive a valid http response",
+)
+MAX_TRANSIENT_DELEGATE_RETRIES = 1
 
 
 class _VerifyPdfUrlInput(BaseModel):
@@ -104,49 +111,67 @@ class BrowserDelegationManager:
             decision="delegate_start",
         )
         try:
-            result = await self._run_delegate_async(
-                session_name=session_name,
-                url=url,
-                intent=intent,
-                url_id=url_id,
-                initial_links=initial_links,
-            )
-            self.telemetry.emit(
-                phase="browser_delegate",
-                actor="browser_agent",
-                url_id=url_id,
-                input_payload={"url": url},
-                output_summary=result.model_dump(mode="json"),
-                decision=result.classification,
-            )
-            for recipe_step in result.recipe:
-                self.telemetry.emit(
-                    phase="browser_step",
-                    actor="browser_agent",
-                    url_id=url_id,
-                    input_payload=recipe_step.params,
-                    output_summary=recipe_step.observations,
-                    decision=recipe_step.action,
-                    extra={"browser_step_no": recipe_step.step_no},
-                )
-            return result
-        except Exception as exc:
-            fallback = self._delegate_error_result(
-                session_name=session_name,
-                url=url,
-                intent=intent,
-                error=exc,
-            )
-            self.telemetry.emit(
-                phase="browser_delegate",
-                actor="system",
-                url_id=url_id,
-                input_payload={"url": url},
-                output_summary=fallback.model_dump(mode="json"),
-                decision="delegate_failed_fallback",
-                error_code=type(exc).__name__,
-            )
-            return fallback
+            max_attempts = 1 + MAX_TRANSIENT_DELEGATE_RETRIES
+            attempt = 1
+            while True:
+                try:
+                    result = await self._run_delegate_async(
+                        session_name=session_name,
+                        url=url,
+                        intent=intent,
+                        url_id=url_id,
+                        initial_links=initial_links,
+                    )
+                    self.telemetry.emit(
+                        phase="browser_delegate",
+                        actor="browser_agent",
+                        url_id=url_id,
+                        input_payload={"url": url, "attempt": attempt},
+                        output_summary=result.model_dump(mode="json"),
+                        decision=result.classification,
+                    )
+                    for recipe_step in result.recipe:
+                        self.telemetry.emit(
+                            phase="browser_step",
+                            actor="browser_agent",
+                            url_id=url_id,
+                            input_payload=recipe_step.params,
+                            output_summary=recipe_step.observations,
+                            decision=recipe_step.action,
+                            extra={"browser_step_no": recipe_step.step_no},
+                        )
+                    return result
+                except Exception as exc:
+                    if self._should_retry_delegate_error(exc=exc, attempt=attempt, max_attempts=max_attempts):
+                        self.telemetry.emit(
+                            phase="browser_delegate",
+                            actor="system",
+                            url_id=url_id,
+                            input_payload={"url": url, "attempt": attempt},
+                            output_summary={"error": _exception_to_text(exc), "max_attempts": max_attempts},
+                            decision="delegate_retry",
+                            error_code=type(exc).__name__,
+                        )
+                        attempt += 1
+                        await asyncio.sleep(0.2)
+                        continue
+
+                    fallback = self._delegate_error_result(
+                        session_name=session_name,
+                        url=url,
+                        intent=intent,
+                        error=exc,
+                    )
+                    self.telemetry.emit(
+                        phase="browser_delegate",
+                        actor="system",
+                        url_id=url_id,
+                        input_payload={"url": url, "attempt": attempt},
+                        output_summary=fallback.model_dump(mode="json"),
+                        decision="delegate_failed_fallback",
+                        error_code=type(exc).__name__,
+                    )
+                    return fallback
         finally:
             active_after = self._dec()
             self.telemetry.emit(
@@ -156,6 +181,17 @@ class BrowserDelegationManager:
                 output_summary={"active_browser_sessions": active_after},
                 decision="delegate_end",
             )
+
+    def _should_retry_delegate_error(self, *, exc: Exception, attempt: int, max_attempts: int) -> bool:
+        if attempt >= max_attempts:
+            return False
+
+        message = _exception_to_text(exc).strip().lower()
+        if not message:
+            return False
+        if "browser_delegate_timeout_after_" in message:
+            return False
+        return any(marker in message for marker in TRANSIENT_DELEGATE_ERROR_MARKERS)
 
     def _run_delegate_sync(
         self,
