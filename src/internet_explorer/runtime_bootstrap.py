@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +18,12 @@ from internet_explorer.config import _resolve_ovpn_config_path
 from internet_explorer.persistence import _strip_tls_ca_file_from_uri
 from internet_explorer.persistence import ping_mongo
 from internet_explorer.vpn import GenericVpnManager
+
+BROWSER_TMP_PREFIXES = (
+    "browser-use-user-data-dir-",
+    "browser-use-downloads-",
+    "browser_use_agent_",
+)
 
 
 class RuntimeBootstrapResult(BaseModel):
@@ -29,6 +39,7 @@ class RuntimeBootstrapResult(BaseModel):
     vpn_status_after: dict[str, Any] | None = None
     mongo_reachable: bool | None = None
     mongo_message: str = ""
+    tmp_cleanup: dict[str, Any] = Field(default_factory=dict)
     error_type: str = ""
     error: str = ""
 
@@ -61,6 +72,82 @@ def _resolve_env_path(root_dir: Path, raw_path: str) -> Path | None:
     if not path.is_absolute():
         path = root_dir / path
     return path.resolve()
+
+
+def _is_ie_worker_running() -> bool:
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["pgrep", "-f", "^python -m internet_explorer.cli"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return False
+    return bool((result.stdout or "").strip())
+
+
+def _safe_dir_size_bytes(path: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for file_name in files:
+            file_path = Path(root) / file_name
+            try:
+                total += file_path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def cleanup_stale_browser_tmp_dirs(
+    *,
+    tmp_root: Path = Path("/tmp"),
+    older_than_minutes: int = 30,
+    skip_if_ie_worker_running: bool = True,
+) -> dict[str, Any]:
+    normalized_minutes = max(0, int(older_than_minutes))
+    worker_running = _is_ie_worker_running() if skip_if_ie_worker_running else False
+    result: dict[str, Any] = {
+        "tmp_root": str(tmp_root),
+        "older_than_minutes": normalized_minutes,
+        "worker_running": worker_running,
+        "matched_count": 0,
+        "removed_count": 0,
+        "removed_bytes": 0,
+        "failed_count": 0,
+        "skipped_recent_count": 0,
+        "skipped_reason": "",
+    }
+    if worker_running:
+        result["skipped_reason"] = "active_worker_detected"
+        return result
+    if not tmp_root.exists():
+        result["skipped_reason"] = "tmp_root_missing"
+        return result
+
+    cutoff_epoch = time.time() - (normalized_minutes * 60)
+    for entry in tmp_root.iterdir():
+        if not entry.is_dir():
+            continue
+        if not entry.name.startswith(BROWSER_TMP_PREFIXES):
+            continue
+        result["matched_count"] += 1
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            result["failed_count"] += 1
+            continue
+        if mtime >= cutoff_epoch:
+            result["skipped_recent_count"] += 1
+            continue
+        try:
+            result["removed_bytes"] += _safe_dir_size_bytes(entry)
+            shutil.rmtree(entry)
+            result["removed_count"] += 1
+        except Exception:
+            result["failed_count"] += 1
+    return result
 
 
 def build_runtime_env_updates(root_dir: Path, env_values: dict[str, str], explicit_ovpn: str = "") -> dict[str, str]:
@@ -158,6 +245,7 @@ def run_runtime_bootstrap(
             )
         ],
     )
+    result.tmp_cleanup = cleanup_stale_browser_tmp_dirs()
 
     try:
         config = AppConfig.from_env(

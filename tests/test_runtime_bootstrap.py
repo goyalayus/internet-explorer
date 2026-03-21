@@ -1,8 +1,10 @@
 from pathlib import Path
+import os
 
 from internet_explorer.config import _derive_docdb_endpoint_from_mongodb_uri
 from internet_explorer.runtime_bootstrap import apply_env_updates
 from internet_explorer.runtime_bootstrap import build_runtime_env_updates
+from internet_explorer.runtime_bootstrap import cleanup_stale_browser_tmp_dirs
 from internet_explorer.runtime_bootstrap import run_runtime_bootstrap
 
 
@@ -241,3 +243,46 @@ def test_run_runtime_bootstrap_uses_in_memory_updates_when_env_write_is_disabled
     env_text = (root_dir / ".env").read_text()
     assert "VPN_OVPN_CONFIG=" not in env_text
     assert "MONGODB_TLS_CA_FILE=" not in env_text
+
+
+def test_cleanup_stale_browser_tmp_dirs_removes_old_entries_only(tmp_path: Path) -> None:
+    old_dir = tmp_path / "browser-use-user-data-dir-old"
+    old_dir.mkdir()
+    (old_dir / "file.txt").write_text("old")
+    os.utime(old_dir, (1, 1))
+
+    new_dir = tmp_path / "browser-use-user-data-dir-new"
+    new_dir.mkdir()
+    (new_dir / "file.txt").write_text("new")
+
+    unrelated = tmp_path / "other-dir"
+    unrelated.mkdir()
+
+    result = cleanup_stale_browser_tmp_dirs(
+        tmp_root=tmp_path,
+        older_than_minutes=30,
+        skip_if_ie_worker_running=False,
+    )
+
+    assert result["removed_count"] == 1
+    assert old_dir.exists() is False
+    assert new_dir.exists() is True
+    assert unrelated.exists() is True
+
+
+def test_cleanup_stale_browser_tmp_dirs_skips_when_worker_running(monkeypatch, tmp_path: Path) -> None:
+    old_dir = tmp_path / "browser-use-user-data-dir-old"
+    old_dir.mkdir()
+    (old_dir / "file.txt").write_text("old")
+    os.utime(old_dir, (1, 1))
+
+    monkeypatch.setattr("internet_explorer.runtime_bootstrap._is_ie_worker_running", lambda: True)
+
+    result = cleanup_stale_browser_tmp_dirs(
+        tmp_root=tmp_path,
+        older_than_minutes=30,
+        skip_if_ie_worker_running=True,
+    )
+
+    assert result["skipped_reason"] == "active_worker_detected"
+    assert old_dir.exists() is True
