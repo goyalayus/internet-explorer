@@ -212,6 +212,8 @@ def test_browser_delegate_prompt_includes_search_flow_discipline(tmp_path: Path)
     assert "Before leaving a loaded search/listing workflow page or calling `done`" in task
     assert "Do not jump to Google or DuckDuckGo" in task
     assert "Set Your Search Criteria" in task
+    assert "CAPTCHAs are not automatically solved" in task
+    assert "Do not claim that CAPTCHA was solved automatically" in task
 
 
 def test_browser_delegate_prefers_gemini_when_available(monkeypatch, tmp_path: Path) -> None:
