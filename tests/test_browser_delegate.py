@@ -195,6 +195,65 @@ def test_browser_delegate_uses_planner_and_native_browser_use(monkeypatch, tmp_p
     assert result.recipe[1].action == "click"
 
 
+def test_browser_delegate_prefers_gemini_when_available(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.gemini_api_key = "gemini-key"
+    config.azure_openai_api_key = "azure-key"
+    config.azure_openai_endpoint = "https://example.openai.azure.com"
+    captured: dict[str, object] = {}
+
+    def _llm_by_name(name: str):
+        captured["llm_name"] = name
+        return object()
+
+    monkeypatch.setattr(
+        "internet_explorer.browser_delegate.load_eu_swarm_modules",
+        lambda config: {
+            "AzureOpenAIProvider": _AzureOpenAIProvider,
+            "create_agent": lambda **kwargs: _PlannerAgent({}),
+            "SmartScraperPlan": _SmartScraperPlan,
+            "BrowserUseAgent": _BrowserUseAgent,
+            "BrowserUseBrowser": _Browser,
+            "get_browser_use_llm_by_name": _llm_by_name,
+        },
+    )
+
+    manager = BrowserDelegationManager(config, _TelemetryStub(), lambda update: None)
+    manager._create_browser_use_llm()
+
+    assert captured["llm_name"] == "google_gemini_2_5_flash"
+
+
+def test_browser_delegate_uses_configured_browser_use_model(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.browser_use_llm_model = "openai_gpt_4o_mini"
+    config.gemini_api_key = "gemini-key"
+    config.azure_openai_api_key = "azure-key"
+    config.azure_openai_endpoint = "https://example.openai.azure.com"
+    captured: dict[str, object] = {}
+
+    def _llm_by_name(name: str):
+        captured["llm_name"] = name
+        return object()
+
+    monkeypatch.setattr(
+        "internet_explorer.browser_delegate.load_eu_swarm_modules",
+        lambda config: {
+            "AzureOpenAIProvider": _AzureOpenAIProvider,
+            "create_agent": lambda **kwargs: _PlannerAgent({}),
+            "SmartScraperPlan": _SmartScraperPlan,
+            "BrowserUseAgent": _BrowserUseAgent,
+            "BrowserUseBrowser": _Browser,
+            "get_browser_use_llm_by_name": _llm_by_name,
+        },
+    )
+
+    manager = BrowserDelegationManager(config, _TelemetryStub(), lambda update: None)
+    manager._create_browser_use_llm()
+
+    assert captured["llm_name"] == "openai_gpt_4o_mini"
+
+
 def test_browser_delegate_normalizes_browser_output_shapes(monkeypatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
 

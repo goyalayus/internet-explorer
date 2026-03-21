@@ -39,9 +39,12 @@ def load_eu_swarm_modules(config: AppConfig) -> dict[str, object]:
     os.environ["AZURE_OPENAI_ENDPOINT"] = config.azure_openai_endpoint
     os.environ["AZURE_OPENAI_API_VERSION"] = config.azure_openai_api_version
     os.environ["AZURE_OPENAI_DEPLOYMENT"] = config.azure_openai_model
-    if config.gemini_api_key:
-        os.environ["GEMINI_API_KEY"] = config.gemini_api_key
-        os.environ.setdefault("GOOGLE_API_KEY", config.gemini_api_key)
+    primary_gemini_key = config.gemini_api_key or _first_api_key(config.gemini_api_keys)
+    if primary_gemini_key:
+        os.environ["GEMINI_API_KEY"] = primary_gemini_key
+        os.environ.setdefault("GOOGLE_API_KEY", primary_gemini_key)
+    if config.browser_use_llm_model:
+        os.environ["BROWSER_USE_LLM_MODEL"] = config.browser_use_llm_model
 
     paths: list[Path] = []
     if config.eu_swarm_path is not None:
@@ -98,3 +101,11 @@ def _resolve_browser_use_site_packages(eu_swarm_path: Path) -> Path | None:
             if (site_packages / "browser_use").exists():
                 return site_packages
     return None
+
+
+def _first_api_key(raw_keys: str) -> str:
+    for item in raw_keys.split(","):
+        candidate = item.strip()
+        if candidate:
+            return candidate
+    return ""

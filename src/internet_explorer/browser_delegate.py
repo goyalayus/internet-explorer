@@ -291,21 +291,35 @@ class BrowserDelegationManager:
 
     def _create_browser_use_llm(self):
         get_llm_by_name = self.modules["get_browser_use_llm_by_name"]
-        model_name = os.getenv("BROWSER_USE_LLM_MODEL", "").strip()
-        if model_name:
+        candidates: list[str] = []
+
+        if self.config.browser_use_llm_model:
+            candidates.append(self.config.browser_use_llm_model.strip())
+
+        if any(
+            [
+                self.config.gemini_api_key,
+                self.config.gemini_api_keys,
+                os.getenv("GEMINI_API_KEY"),
+                os.getenv("GOOGLE_API_KEY"),
+            ]
+        ):
+            candidates.append("google_gemini_2_5_flash")
+
+        if self.config.azure_openai_api_key and self.config.azure_openai_endpoint:
+            candidates.append("azure_gpt_4_1_mini")
+
+        if os.getenv("OPENAI_API_KEY"):
+            candidates.append("openai_gpt_4o_mini")
+
+        for candidate in candidates:
+            if not candidate:
+                continue
             try:
-                return get_llm_by_name(model_name)
+                return get_llm_by_name(candidate)
             except Exception:
-                return None
-        try:
-            if self.config.azure_openai_api_key and self.config.azure_openai_endpoint:
-                return get_llm_by_name("azure_gpt_4_1_mini")
-            if os.getenv("OPENAI_API_KEY"):
-                return get_llm_by_name("openai_gpt_4o_mini")
-            if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
-                return get_llm_by_name("google_gemini_2_5_flash")
-        except Exception:
-            return None
+                continue
+
         return None
 
     def _build_browser_use_tools(self, *, intent: str, url_id: str):
