@@ -4,7 +4,7 @@ from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from internet_explorer.canonicalize import canonicalize_url, homepage_url_for_domain, registrable_domain
 from internet_explorer.fetcher import AsyncWebFetcher
@@ -25,6 +25,18 @@ class _PdfDecisionEnvelope(BaseModel):
     summary: str = ""
     reasoning: str
     extracted_signals: list[str] = Field(default_factory=list)
+
+    @field_validator("extracted_signals", mode="before")
+    @classmethod
+    def _coerce_extracted_signals(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            stripped = value.strip()
+            return [stripped] if stripped else []
+        if isinstance(value, list):
+            return value
+        return []
 
 
 class PdfVerifierService:
