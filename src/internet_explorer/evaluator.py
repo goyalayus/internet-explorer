@@ -1061,7 +1061,6 @@ def _normalize_decision_response(
 
     outcome = _normalize_outcome(response)
     useful = _normalize_useful(response, outcome=outcome)
-    relevance_score = _normalize_score(response, useful=useful, outcome=outcome)
     reasoning = (
         (response.reasoning or "").strip()
         or (response.why_useful or "").strip()
@@ -1073,6 +1072,14 @@ def _normalize_decision_response(
     )
     api_stage = _normalize_api_stage(response, outcome=outcome)
     source_evidence = _normalize_source_evidence(response.source_evidence) or inferred_source_evidence
+    outcome, useful = _reconcile_unknown_useful_outcome(
+        outcome=outcome,
+        useful=useful,
+        api_stage=api_stage,
+        source_evidence=source_evidence,
+        notes=notes,
+    )
+    relevance_score = _normalize_score(response, useful=useful, outcome=outcome)
 
     return EvaluationDecision(
         useful=useful,
@@ -1156,6 +1163,45 @@ def _normalize_api_stage(response: _DecisionRawEnvelope, *, outcome: str) -> str
     if outcome == "api_available":
         return "api_detected"
     return "none"
+
+
+def _reconcile_unknown_useful_outcome(
+    *,
+    outcome: str,
+    useful: bool,
+    api_stage: str,
+    source_evidence: list[SourceEvidenceItem],
+    notes: list[str],
+) -> tuple[str, bool]:
+    if outcome != "unknown" or not useful:
+        return outcome, useful
+
+    inferred_outcome = _infer_outcome_from_source_evidence(
+        api_stage=api_stage,
+        source_evidence=source_evidence,
+    )
+    if inferred_outcome != "unknown":
+        notes.append("unknown_useful_outcome_inferred_from_evidence")
+        return inferred_outcome, True
+
+    notes.append("unknown_useful_outcome_demoted")
+    return "unknown", False
+
+
+def _infer_outcome_from_source_evidence(*, api_stage: str, source_evidence: list[SourceEvidenceItem]) -> str:
+    if api_stage != "none":
+        return "api_available"
+
+    kinds = {item.kind for item in source_evidence}
+    if "paywall" in kinds:
+        return "paywall"
+    if "contact_sales" in kinds:
+        return "contact_sales_only"
+    if "api" in kinds:
+        return "api_available"
+    if kinds.intersection({"page", "pdf", "dataset", "file", "browser_finding"}):
+        return "data_on_site"
+    return "unknown"
 
 
 def _normalize_source_evidence(raw: Any) -> list[SourceEvidenceItem]:

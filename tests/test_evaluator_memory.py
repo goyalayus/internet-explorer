@@ -306,6 +306,34 @@ async def test_evaluator_normalizes_category_reason_shape(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_evaluator_infers_outcome_when_useful_true_but_outcome_unknown(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    evaluator = UrlEvaluator(
+        config,
+        _LLMStub(
+            tool_terms=["newsource"],
+            decision_payload={
+                "useful": True,
+                "reasoning": "This looks useful, but the model forgot to label the outcome.",
+                "api_stage": "none",
+            },
+        ),
+        _FetcherStub(_responses()),
+        _TelemetryStub(),
+        _BrowserManagerStub(),
+        tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
+    )
+    candidate = _candidate("url_shape_fix")
+
+    evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
+
+    assert evaluation.useful is True
+    assert evaluation.outcome == "data_on_site"
+    assert "unknown_useful_outcome_inferred_from_evidence" in evaluation.notes
+    assert all(not note.startswith("evaluation_error:") for note in evaluation.notes)
+
+
+@pytest.mark.asyncio
 async def test_evaluator_accepts_string_source_evidence_urls(tmp_path: Path) -> None:
     config = _config(tmp_path)
     evaluator = UrlEvaluator(
