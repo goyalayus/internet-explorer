@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from internet_explorer.models import UrlCandidate, UrlEvaluation
+from internet_explorer.models import QueryPlan, SearchResult, Strategy, UrlCandidate, UrlEvaluation
+from internet_explorer.planning_cache import DiscoveryPlanningCacheStore
 from internet_explorer.service import IntentDiscoveryService
 
 
@@ -32,6 +33,43 @@ class _EvaluatorStub:
             outcome="data_on_site" if candidate.url_id == "url_2" else "irrelevant",
             useful=candidate.url_id == "url_2",
         )
+
+
+class _PlannerFailStub:
+    async def generate_strategies(self, intent: str):  # noqa: ARG002
+        raise AssertionError("planner should not be called on cache hit")
+
+    async def generate_queries(self, intent: str, strategy):  # noqa: ARG002
+        raise AssertionError("planner should not be called on cache hit")
+
+
+class _SearcherFailStub:
+    async def collect_many(self, queries):  # noqa: ARG002
+        raise AssertionError("search should not be called on cache hit")
+
+
+class _PlannerStub:
+    async def generate_strategies(self, intent: str):  # noqa: ARG002
+        return [Strategy(strategy_id="strategy_1", title="Gov", concept="Gov sources")]
+
+    async def generate_queries(self, intent: str, strategy: Strategy):  # noqa: ARG002
+        return [QueryPlan(query_id="query_1", strategy_id=strategy.strategy_id, query="data annotation rfp site:gov")]
+
+
+class _SearcherStub:
+    async def collect_many(self, queries: list[QueryPlan]):
+        assert len(queries) == 1
+        return [
+            SearchResult(
+                query_id=queries[0].query_id,
+                strategy_id=queries[0].strategy_id,
+                rank=1,
+                serp_page=1,
+                title="RFP",
+                snippet="Opportunity",
+                url="https://example.gov/rfp",
+            )
+        ]
 
 
 def _candidate(url_id: str, domain: str) -> UrlCandidate:
@@ -85,3 +123,80 @@ async def test_evaluate_candidates_calls_on_result_as_each_result_finishes() -> 
         "batch_start",
         "batch_done",
     ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_discovery_inputs_uses_cache_on_hit(tmp_path) -> None:
+    service = object.__new__(IntentDiscoveryService)
+    service.config = SimpleNamespace(
+        discovery_cache_mode="read_write",
+        discovery_cache_dir=tmp_path / "cache",
+        discovery_cache_key="shared-rfp-key",
+        strategy_count=10,
+        queries_per_strategy=5,
+        serp_pages_per_query=2,
+        results_per_serp_page=10,
+    )
+    telemetry = _TelemetryStub()
+    cache_store = DiscoveryPlanningCacheStore(service.config)
+    cache_store.save(
+        intent="Find sources",
+        strategies=[Strategy(strategy_id="strategy_1", title="Gov", concept="Gov sources")],
+        queries=[QueryPlan(query_id="query_1", strategy_id="strategy_1", query="query")],
+        raw_results=[
+            SearchResult(
+                query_id="query_1",
+                strategy_id="strategy_1",
+                rank=1,
+                serp_page=1,
+                title="Example",
+                snippet="Example",
+                url="https://example.gov/rfp",
+            )
+        ],
+    )
+
+    strategies, queries, raw_results, cache_info = await IntentDiscoveryService._resolve_discovery_inputs(
+        service,
+        intent="Find sources",
+        planner=_PlannerFailStub(),
+        searcher=_SearcherFailStub(),
+        telemetry=telemetry,
+    )
+
+    assert len(strategies) == 1
+    assert len(queries) == 1
+    assert len(raw_results) == 1
+    assert cache_info["status"] == "hit"
+    assert any(event["decision"] == "cache_hit" for event in telemetry.events)
+
+
+@pytest.mark.asyncio
+async def test_resolve_discovery_inputs_writes_cache_on_miss(tmp_path) -> None:
+    service = object.__new__(IntentDiscoveryService)
+    service.config = SimpleNamespace(
+        discovery_cache_mode="read_write",
+        discovery_cache_dir=tmp_path / "cache",
+        discovery_cache_key="shared-rfp-key",
+        strategy_count=10,
+        queries_per_strategy=5,
+        serp_pages_per_query=2,
+        results_per_serp_page=10,
+    )
+    telemetry = _TelemetryStub()
+
+    strategies, queries, raw_results, cache_info = await IntentDiscoveryService._resolve_discovery_inputs(
+        service,
+        intent="Find sources",
+        planner=_PlannerStub(),
+        searcher=_SearcherStub(),
+        telemetry=telemetry,
+    )
+
+    assert len(strategies) == 1
+    assert len(queries) == 1
+    assert len(raw_results) == 1
+    assert cache_info["status"] == "written"
+    assert (service.config.discovery_cache_dir / "shared-rfp-key.json").exists()
+    assert any(event["decision"] == "cache_miss" for event in telemetry.events)
+    assert any(event["decision"] == "cache_write" for event in telemetry.events)

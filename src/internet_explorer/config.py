@@ -117,6 +117,9 @@ class AppConfig(BaseModel):
     baseline_domains_file: Path
     known_tools_file: Path
     candidate_start_mode: str = "domain_homepage"
+    discovery_cache_mode: str = "off"
+    discovery_cache_dir: Path = Path("data/discovery_cache")
+    discovery_cache_key: str = ""
     max_browser_concurrency: int = 0
     browser_delegate_timeout_seconds: int = 180
     max_url_concurrency: int = 0
@@ -151,7 +154,14 @@ class AppConfig(BaseModel):
     llm_max_retries: int = 2
     env_file_path: Path
 
-    @field_validator("workspace_root", "baseline_domains_file", "known_tools_file", "env_file_path", "vpn_log_dir")
+    @field_validator(
+        "workspace_root",
+        "baseline_domains_file",
+        "known_tools_file",
+        "env_file_path",
+        "vpn_log_dir",
+        "discovery_cache_dir",
+    )
     @classmethod
     def _expand_required_path(cls, value: Path) -> Path:
         return value.expanduser().resolve()
@@ -162,6 +172,16 @@ class AppConfig(BaseModel):
         if value is None:
             return None
         return value.expanduser().resolve()
+
+    @field_validator("discovery_cache_mode")
+    @classmethod
+    def _validate_discovery_cache_mode(cls, value: str) -> str:
+        mode = (value or "").strip().lower()
+        allowed = {"off", "read_only", "read_write", "refresh"}
+        if mode not in allowed:
+            allowed_values = ", ".join(sorted(allowed))
+            raise ValueError(f"DISCOVERY_CACHE_MODE must be one of: {allowed_values}")
+        return mode
 
     @classmethod
     def from_env(
@@ -285,6 +305,9 @@ class AppConfig(BaseModel):
             baseline_domains_file=Path(env_value("BASELINE_DOMAINS_FILE", str(root_dir / "data/tool_flow_baseline_domains.txt"))),
             known_tools_file=Path(env_value("KNOWN_TOOLS_FILE", str(root_dir / "data/known_tools.txt"))),
             candidate_start_mode=env_value("CANDIDATE_START_MODE", "domain_homepage"),
+            discovery_cache_mode=env_value("DISCOVERY_CACHE_MODE", "off"),
+            discovery_cache_dir=Path(env_value("DISCOVERY_CACHE_DIR", str(root_dir / "data/discovery_cache"))),
+            discovery_cache_key=env_value("DISCOVERY_CACHE_KEY"),
             max_browser_concurrency=int(env_value("MAX_BROWSER_CONCURRENCY", "0")),
             browser_delegate_timeout_seconds=int(env_value("BROWSER_DELEGATE_TIMEOUT_SECONDS", "180")),
             max_url_concurrency=int(env_value("MAX_URL_CONCURRENCY", "0")),

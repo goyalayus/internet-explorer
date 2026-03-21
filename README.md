@@ -77,6 +77,13 @@ Important behavior:
 - `BROWSER_USE_LLM_MODEL` lets you pin the delegated browser agent to a specific browser-use model alias. If left blank, browser delegation prefers Gemini when Gemini keys are configured.
 - `CANDIDATE_START_MODE=domain_homepage` means one candidate per unique domain and the normal agent starts from the domain homepage.
 - `CANDIDATE_START_MODE=first_result_url` means one candidate per unique domain but the normal agent starts from the first SERP URL seen for that domain.
+- `DISCOVERY_CACHE_MODE` controls caching for strategy/query/SERP generation:
+  - `off`: always regenerate.
+  - `read_write`: use cache on hit, generate+store on miss.
+  - `read_only`: require cache to exist.
+  - `refresh`: regenerate and overwrite cache.
+- `DISCOVERY_CACHE_KEY` can be set to a shared value so both `domain_homepage` and `first_result_url` runs reuse the exact same planning/search snapshot.
+- `DISCOVERY_CACHE_DIR` stores the snapshot files as local JSON.
 - `MAX_SITE_GRAPH_FRONTIER` controls how many initial seeded links are passed into browser delegation.
 - `PDF_INLINE_MAX_BYTES` limits direct inline Gemini PDF verification size.
 - `KNOWN_TOOLS_FILE` provides the static duplicate-tool baseline.

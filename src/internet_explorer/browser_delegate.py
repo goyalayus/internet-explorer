@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import re
@@ -103,10 +104,7 @@ class BrowserDelegationManager:
             decision="delegate_start",
         )
         try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(self._run_delegate_sync, session_name, url, intent, url_id, initial_links),
-                timeout=max(1, self.config.browser_delegate_timeout_seconds),
-            )
+            result = await asyncio.to_thread(self._run_delegate_sync, session_name, url, intent, url_id, initial_links)
             self.telemetry.emit(
                 phase="browser_delegate",
                 actor="browser_agent",
@@ -266,6 +264,7 @@ class BrowserDelegationManager:
             chromium_sandbox=self.config.browser_chromium_sandbox,
         )
         await browser.start()
+        agent = None
         try:
             agent_kwargs: dict[str, Any] = {
                 "task": browser_task,
@@ -277,7 +276,11 @@ class BrowserDelegationManager:
                 agent_kwargs["tools"] = tools
                 agent_kwargs["controller"] = tools
             agent = BrowserUseAgent(**agent_kwargs)
-            history = await agent.run(max_steps=max_steps)
+            timeout_seconds = max(1, self.config.browser_delegate_timeout_seconds)
+            try:
+                history = await asyncio.wait_for(agent.run(max_steps=max_steps), timeout=timeout_seconds)
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError(f"browser_delegate_timeout_after_{timeout_seconds}s") from exc
             return {
                 "final_result": history.final_result() if hasattr(history, "final_result") else None,
                 "is_successful": history.is_successful() if hasattr(history, "is_successful") else None,
@@ -287,7 +290,14 @@ class BrowserDelegationManager:
                 "extracted_content": history.extracted_content() if hasattr(history, "extracted_content") else [],
             }
         finally:
-            await browser.stop()
+            try:
+                if agent is not None:
+                    await _maybe_call_close(agent)
+            finally:
+                try:
+                    await browser.stop()
+                finally:
+                    await _maybe_call_close(llm)
 
     def _create_browser_use_llm(self):
         get_llm_by_name = self.modules["get_browser_use_llm_by_name"]
@@ -593,3 +603,19 @@ def _exception_to_text(exc: Exception) -> str:
     if text:
         return text
     return type(exc).__name__
+
+
+async def _maybe_call_close(target: Any) -> None:
+    if target is None:
+        return
+    for method_name in ("aclose", "close"):
+        method = getattr(target, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            result = method()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            return
+        return

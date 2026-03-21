@@ -11,7 +11,8 @@ from internet_explorer.config import AppConfig
 from internet_explorer.evaluator import UrlEvaluator
 from internet_explorer.fetcher import AsyncWebFetcher
 from internet_explorer.llm import LLMClient
-from internet_explorer.models import RunSummary, UrlCandidate
+from internet_explorer.models import QueryPlan, RunSummary, SearchResult, Strategy, UrlCandidate
+from internet_explorer.planning_cache import DiscoveryPlanningCacheStore
 from internet_explorer.pdf_verify import PdfVerifierService
 from internet_explorer.persistence import MongoPersistence
 from internet_explorer.search import GoogleSearchCollector
@@ -49,6 +50,9 @@ class IntentDiscoveryService:
                 "vpn_docdb_port": self.config.vpn_docdb_port,
                 "vpn_log_dir": str(self.config.vpn_log_dir),
                 "eu_swarm_path": str(self.config.eu_swarm_path) if self.config.eu_swarm_path else None,
+                "discovery_cache_mode": self.config.discovery_cache_mode,
+                "discovery_cache_dir": str(self.config.discovery_cache_dir),
+                "discovery_cache_key": self.config.discovery_cache_key or None,
             },
         )
 
@@ -98,18 +102,23 @@ class IntentDiscoveryService:
                     decision=vpn_status.message,
                 )
 
-            strategies = await planner.generate_strategies(intent)
+            strategies, queries, raw_results, cache_info = await self._resolve_discovery_inputs(
+                intent=intent,
+                planner=planner,
+                searcher=searcher,
+                telemetry=telemetry,
+            )
             summary.strategy_count = len(strategies)
-            queries = []
-            for strategy in strategies:
-                queries.extend(await planner.generate_queries(intent, strategy))
             summary.query_count = len(queries)
             self.persistence.update_run(
                 run_id,
-                {"strategy_count": summary.strategy_count, "query_count": summary.query_count},
+                {
+                    "strategy_count": summary.strategy_count,
+                    "query_count": summary.query_count,
+                    "planning_cache": cache_info,
+                },
             )
 
-            raw_results = await searcher.collect_many(queries)
             summary.raw_result_count = len(raw_results)
             telemetry.emit(
                 phase="url_extract",
@@ -189,6 +198,7 @@ class IntentDiscoveryService:
         finally:
             await fetcher.close()
             await searcher.close()
+            await self.llm.close()
             if self.config.auto_start_vpn and vpn_started_by_service:
                 try:
                     vpn_status = await asyncio.to_thread(vpn_manager.stop)
@@ -207,6 +217,121 @@ class IntentDiscoveryService:
                         decision="stop_failed",
                         error_code=type(exc).__name__,
                     )
+
+    async def _resolve_discovery_inputs(
+        self,
+        *,
+        intent: str,
+        planner: StrategyPlanner,
+        searcher: GoogleSearchCollector,
+        telemetry: Telemetry,
+    ) -> tuple[list[Strategy], list[QueryPlan], list[SearchResult], dict]:
+        mode = self.config.discovery_cache_mode
+        if mode == "off":
+            strategies, queries, raw_results = await self._build_discovery_inputs_live(intent, planner, searcher)
+            return strategies, queries, raw_results, {"mode": mode, "status": "disabled"}
+
+        cache_store = DiscoveryPlanningCacheStore(self.config)
+        cache_path = cache_store.path_for_intent(intent)
+        cache_key = cache_store.key_for_intent(intent)
+
+        if mode in {"read_only", "read_write"}:
+            cached_snapshot = None
+            try:
+                cached_snapshot = cache_store.load(intent)
+            except Exception as exc:
+                telemetry.emit(
+                    phase="planning_cache",
+                    actor="system",
+                    input_payload={"mode": mode, "cache_key": cache_key, "cache_path": str(cache_path)},
+                    output_summary={"error": str(exc)},
+                    decision="cache_load_error",
+                    error_code=type(exc).__name__,
+                )
+                if mode == "read_only":
+                    raise RuntimeError(
+                        f"DISCOVERY_CACHE_MODE=read_only could not load cache at {cache_path}: {exc}"
+                    ) from exc
+            if cached_snapshot is not None:
+                telemetry.emit(
+                    phase="planning_cache",
+                    actor="system",
+                    input_payload={"mode": mode, "cache_key": cache_key, "cache_path": str(cache_path)},
+                    output_summary={
+                        "strategies": len(cached_snapshot.strategies),
+                        "queries": len(cached_snapshot.queries),
+                        "raw_results": len(cached_snapshot.raw_results),
+                    },
+                    decision="cache_hit",
+                )
+                return (
+                    cached_snapshot.strategies,
+                    cached_snapshot.queries,
+                    cached_snapshot.raw_results,
+                    {
+                        "mode": mode,
+                        "status": "hit",
+                        "cache_key": cache_key,
+                        "cache_path": str(cache_path),
+                        "created_at": cached_snapshot.created_at.isoformat(),
+                    },
+                )
+            telemetry.emit(
+                phase="planning_cache",
+                actor="system",
+                input_payload={"mode": mode, "cache_key": cache_key, "cache_path": str(cache_path)},
+                output_summary={},
+                decision="cache_miss",
+            )
+            if mode == "read_only":
+                raise RuntimeError(f"DISCOVERY_CACHE_MODE=read_only cache file not found: {cache_path}")
+
+        strategies, queries, raw_results = await self._build_discovery_inputs_live(intent, planner, searcher)
+        if mode in {"read_write", "refresh"}:
+            snapshot = cache_store.save(
+                intent=intent,
+                strategies=strategies,
+                queries=queries,
+                raw_results=raw_results,
+            )
+            telemetry.emit(
+                phase="planning_cache",
+                actor="system",
+                input_payload={"mode": mode, "cache_key": cache_key, "cache_path": str(cache_path)},
+                output_summary={
+                    "strategies": len(strategies),
+                    "queries": len(queries),
+                    "raw_results": len(raw_results),
+                },
+                decision="cache_write",
+            )
+            return (
+                strategies,
+                queries,
+                raw_results,
+                {
+                    "mode": mode,
+                    "status": "written",
+                    "cache_key": cache_key,
+                    "cache_path": str(cache_path),
+                    "created_at": snapshot.created_at.isoformat(),
+                },
+            )
+
+        return strategies, queries, raw_results, {"mode": mode, "status": "generated_no_write"}
+
+    async def _build_discovery_inputs_live(
+        self,
+        intent: str,
+        planner: StrategyPlanner,
+        searcher: GoogleSearchCollector,
+    ) -> tuple[list[Strategy], list[QueryPlan], list[SearchResult]]:
+        strategies = await planner.generate_strategies(intent)
+        queries: list[QueryPlan] = []
+        for strategy in strategies:
+            queries.extend(await planner.generate_queries(intent, strategy))
+        raw_results = await searcher.collect_many(queries)
+        return strategies, queries, raw_results
 
     def _dedupe_results(self, raw_results, baseline_domains: set[str], telemetry: Telemetry) -> list[UrlCandidate]:
         deduped: dict[str, UrlCandidate] = {}

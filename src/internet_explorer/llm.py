@@ -215,6 +215,9 @@ class LLMClient:
         }
         return await self._call_gemini(payload=payload)
 
+    async def close(self) -> None:
+        await self.client.aclose()
+
 
 def _extract_text_from_gemini_response(payload: dict) -> str:
     candidates = payload.get("candidates")
