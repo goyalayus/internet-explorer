@@ -22,7 +22,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def _run(intent: str, print_config: bool, vpn_start: bool, vpn_stop: bool, vpn_status: bool, vpn_check_docdb: bool) -> int:
-    config = AppConfig.from_env(Path.cwd())
+    # CLI runtime flags and inline env vars should be able to override `.env`.
+    config = AppConfig.from_env(Path.cwd(), prefer_process_env=True)
     if intent:
         config.intent = intent
     if print_config:
