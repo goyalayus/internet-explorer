@@ -68,6 +68,20 @@ class _NavigationPlanEnvelope(BaseModel):
     action_notes: list[str] = Field(default_factory=list)
 
 
+class _NavigationRawPlanEnvelope(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    reasoning: str | None = None
+    reason: str | None = None
+    action: str | None = None
+    next_action: str | None = None
+    target_url: str | None = None
+    url: str | None = None
+    next_url: str | None = None
+    action_notes: list[str] | str | None = None
+    notes: list[str] | str | None = None
+
+
 class _ToolTermEnvelope(BaseModel):
     terms: list[str] = Field(default_factory=list)
     reason: str = ""
@@ -410,6 +424,7 @@ class UrlEvaluator:
                     url_id=candidate.url_id,
                     intent=intent,
                     evidence=page_evidence,
+                    candidate_domain=candidate.domain,
                 )
 
             if browser_result and browser_result.classification == "paywall":
@@ -681,16 +696,13 @@ class UrlEvaluator:
                     "- If a PDF already proved relevance, you can still fetch a portal/homepage page to discover a reusable recurring access surface.\n"
                     "- Return strict JSON only.\n"
                 ),
-                schema=_NavigationPlanEnvelope,
+                schema=_NavigationRawPlanEnvelope,
                 temperature=0.0,
                 max_completion_tokens=700,
             )
-            action = response.action if response.action in allowed_actions else "fetch_url"
-            return _NavigationPlanEnvelope(
-                reasoning=response.reasoning.strip(),
-                action=action,
-                target_url=response.target_url.strip(),
-                action_notes=response.action_notes,
+            return _normalize_navigation_plan_response(
+                response,
+                allowed_actions=allowed_actions,
             )
         except Exception as exc:
             return self._fallback_navigation_step(
@@ -1039,6 +1051,64 @@ def _merge_tool_terms(primary: list[str], secondary: list[str]) -> list[str]:
         seen.add(lowered)
         merged.append(term)
     return merged
+
+
+def _normalize_navigation_plan_response(
+    response: _NavigationRawPlanEnvelope,
+    *,
+    allowed_actions: set[str],
+) -> _NavigationPlanEnvelope:
+    action = _normalize_navigation_action(
+        response.action,
+        next_action=response.next_action,
+        allowed_actions=allowed_actions,
+    )
+    target_url = (
+        (response.target_url or "").strip()
+        or (response.url or "").strip()
+        or (response.next_url or "").strip()
+    )
+    reasoning = (
+        (response.reasoning or "").strip()
+        or (response.reason or "").strip()
+        or "Choose the next best page based on the collected evidence."
+    )
+    action_notes = _normalize_notes(response.action_notes)
+    if not action_notes:
+        action_notes = _normalize_notes(response.notes)
+    if action == "stop":
+        target_url = ""
+    return _NavigationPlanEnvelope(
+        reasoning=reasoning,
+        action=action,
+        target_url=target_url,
+        action_notes=action_notes,
+    )
+
+
+def _normalize_navigation_action(raw_action: str | None, *, next_action: str | None, allowed_actions: set[str]) -> str:
+    for value in (raw_action, next_action):
+        normalized = _map_navigation_action(value)
+        if normalized in allowed_actions:
+            return normalized
+    return "fetch_url" if "fetch_url" in allowed_actions else sorted(allowed_actions)[0]
+
+
+def _map_navigation_action(value: str | None) -> str:
+    lowered = (value or "").strip().lower()
+    if not lowered:
+        return ""
+    if lowered in VALID_NAV_ACTIONS:
+        return lowered
+    if lowered in {"fetch", "navigate", "go_to", "visit", "open", "open_url", "goto"}:
+        return "fetch_url"
+    if lowered in {"read", "read_summary", "inspect_node", "node_summary"}:
+        return "read_node"
+    if lowered in {"browser", "use_browser", "delegate", "delegate_to_browser", "browser_delegate"}:
+        return "delegate_browser"
+    if lowered in {"done", "finish", "end", "halt"}:
+        return "stop"
+    return ""
 
 
 def _normalize_decision_response(

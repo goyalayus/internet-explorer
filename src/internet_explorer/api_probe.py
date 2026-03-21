@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel
 
 from internet_explorer.bash_runner import BashRunner
-from internet_explorer.canonicalize import canonicalize_url
+from internet_explorer.canonicalize import canonicalize_url, registrable_domain
 from internet_explorer.llm import LLMClient
 from internet_explorer.models import ApiProbeResult, ApiSignal, PageEvidence
 from internet_explorer.telemetry import Telemetry
@@ -38,9 +38,16 @@ class ApiProbeService:
         self.llm = llm
         self.runner = BashRunner(timeout_seconds=timeout_seconds)
 
-    async def probe(self, *, url_id: str, intent: str, evidence: list[PageEvidence]) -> ApiProbeResult | None:
+    async def probe(
+        self,
+        *,
+        url_id: str,
+        intent: str,
+        evidence: list[PageEvidence],
+        candidate_domain: str = "",
+    ) -> ApiProbeResult | None:
         api_signal = self._merge_signal(evidence)
-        candidate_url = self._pick_probe_url(api_signal)
+        candidate_url = self._pick_probe_url(api_signal, candidate_domain=candidate_domain)
         if not candidate_url:
             return None
 
@@ -181,18 +188,18 @@ class ApiProbeService:
             segment.append(token)
         return commands
 
-    def _pick_probe_url(self, api_signal: ApiSignal) -> str:
+    def _pick_probe_url(self, api_signal: ApiSignal, *, candidate_domain: str = "") -> str:
         for link in api_signal.openapi_links:
             normalized = _normalize_probe_url(link)
-            if normalized and not _looks_like_document_url(normalized):
+            if _is_viable_probe_url(normalized, candidate_domain=candidate_domain):
                 return normalized
         for link in api_signal.doc_links:
             normalized = _normalize_probe_url(link)
-            if normalized and not _looks_like_document_url(normalized):
+            if _is_viable_probe_url(normalized, candidate_domain=candidate_domain):
                 return normalized
         if api_signal.graphql_hints:
             normalized = _normalize_probe_url(api_signal.graphql_hints[0])
-            if normalized:
+            if _is_viable_probe_url(normalized, candidate_domain=candidate_domain):
                 return normalized
         return ""
 
@@ -323,3 +330,27 @@ def _normalize_probe_url(raw_url: str) -> str:
     if not canonical.startswith(("http://", "https://")):
         return ""
     return canonical
+
+
+def _is_viable_probe_url(url: str, *, candidate_domain: str) -> bool:
+    if not url or _looks_like_document_url(url):
+        return False
+    if candidate_domain and registrable_domain(url) != candidate_domain:
+        return False
+    return _looks_like_apiish_url(url)
+
+
+def _looks_like_apiish_url(url: str) -> bool:
+    parsed = _safe_urlparse(url)
+    if parsed is None:
+        return False
+
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    query = (parsed.query or "").lower()
+
+    if host.startswith(("api.", "developer.", "developers.")):
+        return True
+    if "api-reference" in path or "api-reference" in query:
+        return True
+    return any(token in path for token in ("/api", "/docs", "/developer", "/developers", "/swagger", "/openapi", "/graphql"))

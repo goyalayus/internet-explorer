@@ -129,6 +129,29 @@ def test_pick_probe_url_skips_invalid_url() -> None:
     assert service._pick_probe_url(signal) == "https://example.com/developers/reference"
 
 
+def test_pick_probe_url_rejects_cross_domain_docs_link() -> None:
+    service = ApiProbeService(_TelemetryStub(), _LLMStub())
+    signal = ApiSignal(
+        detected=True,
+        doc_links=[
+            "https://docs.google.com/forms/d/e/example/viewform",
+            "https://example.com/developers/reference",
+        ],
+    )
+
+    assert service._pick_probe_url(signal, candidate_domain="example.com") == "https://example.com/developers/reference"
+
+
+def test_pick_probe_url_rejects_non_api_reference_pages() -> None:
+    service = ApiProbeService(_TelemetryStub(), _LLMStub())
+    signal = ApiSignal(
+        detected=True,
+        doc_links=["https://example.com/applicant-reference-library"],
+    )
+
+    assert service._pick_probe_url(signal, candidate_domain="example.com") == ""
+
+
 def test_guess_content_type_handles_invalid_url() -> None:
     service = ApiProbeService(_TelemetryStub(), _LLMStub())
 

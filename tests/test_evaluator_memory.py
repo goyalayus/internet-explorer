@@ -81,7 +81,7 @@ class _LLMStub:
 
     async def complete_json(self, *, schema, **kwargs):
         name = schema.__name__
-        if name == "_NavigationPlanEnvelope":
+        if name in {"_NavigationPlanEnvelope", "_NavigationRawPlanEnvelope"}:
             self.nav_calls += 1
             index = min(self.nav_calls - 1, len(self.nav_payloads) - 1)
             return schema.model_validate(self.nav_payloads[index])
@@ -364,6 +364,44 @@ async def test_evaluator_accepts_string_source_evidence_urls(tmp_path: Path) -> 
     evidence_by_url = {item.url: item.kind for item in evaluation.source_evidence}
     assert evidence_by_url["https://example.com/rfp/current"] == "page"
     assert evidence_by_url["https://example.com/openapi.json"] == "api"
+    assert all(not note.startswith("evaluation_error:") for note in evaluation.notes)
+
+
+@pytest.mark.asyncio
+async def test_evaluator_normalizes_navigation_plan_shape(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    evaluator = UrlEvaluator(
+        config,
+        _LLMStub(
+            tool_terms=["newsource"],
+            nav_payloads=[
+                {
+                    "reason": "Use the procurement page first.",
+                    "next_action": "visit",
+                    "url": "https://example.com/",
+                    "notes": ["seed"],
+                },
+                {
+                    "reasoning": "Enough evidence collected.",
+                    "action": "stop",
+                    "target_url": "",
+                    "action_notes": [],
+                },
+            ],
+        ),
+        _FetcherStub(_responses()),
+        _TelemetryStub(),
+        _BrowserManagerStub(),
+        tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
+    )
+    candidate = _candidate("url_nav_shape")
+
+    evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
+
+    assert evaluation.useful is True
+    assert evaluation.outcome == "data_on_site"
+    assert len(evaluation.visited_memory) == 1
+    assert evaluation.visited_memory[0].url == "https://example.com/"
     assert all(not note.startswith("evaluation_error:") for note in evaluation.notes)
 
 

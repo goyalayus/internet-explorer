@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 from html import unescape
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -64,6 +64,17 @@ DATA_PATTERNS = (
     "procurement",
     "bid notice",
 )
+STRONG_API_BODY_MARKERS = (
+    "openapi",
+    "swagger ui",
+    "swagger.json",
+    "api-reference",
+    "api reference",
+    "rest api",
+    "graphql endpoint",
+    "developer api",
+)
+NON_API_DOC_EXTENSIONS = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx")
 TRANSIENT_FETCH_ERRORS = (
     httpx.PoolTimeout,
     httpx.ConnectTimeout,
@@ -224,11 +235,19 @@ def extract_relevant_links(base_url: str, html: str, limit: int) -> list[str]:
 def analyze_page(fetch: FetchResult) -> PageEvidence:
     lowered = fetch.html.lower()
     links = extract_relevant_links(fetch.final_url, fetch.html, limit=12) if fetch.html else []
+    doc_links = [link for link in links if _looks_like_api_doc_url(link)]
+    openapi_links = [link for link in links if _looks_like_openapi_link(link)]
+    graphql_hints = [link for link in links if _looks_like_graphql_link(link)]
     api_signal = ApiSignal(
-        detected=any(keyword in lowered for keyword in API_LINK_KEYWORDS),
-        doc_links=[link for link in links if any(keyword in link.lower() for keyword in API_LINK_KEYWORDS)],
-        openapi_links=[link for link in links if any(token in link.lower() for token in ("openapi", "swagger", ".json"))],
-        graphql_hints=[token for token in ("graphql", "/graphql") if token in lowered],
+        detected=bool(
+            doc_links
+            or openapi_links
+            or graphql_hints
+            or any(marker in lowered for marker in STRONG_API_BODY_MARKERS)
+        ),
+        doc_links=doc_links,
+        openapi_links=openapi_links,
+        graphql_hints=graphql_hints,
         auth_required=any(pattern in lowered for pattern in AUTH_PATTERNS),
     )
     data_signals = [pattern for pattern in DATA_PATTERNS if pattern in lowered]
@@ -329,3 +348,32 @@ def _is_textual_content_type(content_type: str) -> bool:
         or "javascript" in lowered
         or "x-www-form-urlencoded" in lowered
     )
+
+
+def _looks_like_api_doc_url(link: str) -> bool:
+    lowered = link.lower()
+    if lowered.endswith(NON_API_DOC_EXTENSIONS):
+        return False
+
+    parsed = urlparse(link)
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    query = (parsed.query or "").lower()
+
+    if host.startswith(("api.", "developer.", "developers.")):
+        return True
+    if "api-reference" in path or "api-reference" in query:
+        return True
+    return any(token in path for token in ("/api", "/docs", "/developer", "/developers", "/swagger", "/openapi"))
+
+
+def _looks_like_openapi_link(link: str) -> bool:
+    lowered = link.lower()
+    if lowered.endswith((".json", ".yaml", ".yml")) and any(token in lowered for token in ("openapi", "swagger", "/api")):
+        return True
+    return any(token in lowered for token in ("openapi", "swagger.json", "swagger.yaml", "swagger.yml"))
+
+
+def _looks_like_graphql_link(link: str) -> bool:
+    lowered = link.lower()
+    return "graphql" in lowered
