@@ -401,6 +401,60 @@ async def test_browser_delegate_retries_transient_cdp_failures(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_browser_delegate_cleans_tmp_and_retries_on_enospc(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    telemetry = _TelemetryStub()
+
+    monkeypatch.setattr(
+        "internet_explorer.browser_delegate.load_eu_swarm_modules",
+        lambda config: {},
+    )
+
+    cleanup_calls: list[dict[str, object]] = []
+
+    def _fake_cleanup(**kwargs):
+        cleanup_calls.append(kwargs)
+        return {
+            "removed_count": 2,
+            "removed_bytes": 1048576,
+            "matched_count": 3,
+        }
+
+    monkeypatch.setattr("internet_explorer.browser_delegate.cleanup_stale_browser_tmp_dirs", _fake_cleanup)
+
+    manager = BrowserDelegationManager(config, telemetry, lambda update: None)
+    attempts = {"count": 0}
+
+    async def _fake_run_delegate_async(**kwargs):  # noqa: ARG001
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("No space left on device while creating profile dir")
+        return BrowserDelegateResult(
+            session_name="session_enospc_retry",
+            classification="data_on_site",
+            useful=True,
+            reasoning="retry succeeded after tmp cleanup",
+        )
+
+    monkeypatch.setattr(manager, "_run_delegate_async", _fake_run_delegate_async)
+
+    result = await manager.delegate(
+        url="https://example.com/start",
+        intent="find sources",
+        url_id="url_enospc_retry",
+        initial_links=[],
+    )
+
+    assert attempts["count"] == 2
+    assert result.classification == "data_on_site"
+    assert result.useful is True
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0]["skip_if_ie_worker_running"] is False
+    assert any(event.get("decision") == "delegate_tmp_cleanup" for event in telemetry.events)
+    assert any(event.get("decision") == "delegate_retry" for event in telemetry.events)
+
+
+@pytest.mark.asyncio
 async def test_browser_delegate_does_not_retry_timeout_errors(monkeypatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
     telemetry = _TelemetryStub()

@@ -15,6 +15,7 @@ from internet_explorer.config import AppConfig
 from internet_explorer.models import BrowserDelegateResult, BrowserStep, SourceEvidenceItem
 from internet_explorer.pdf_verify import PdfVerifierService, pdf_verification_tool_payload
 from internet_explorer.repo_bridge import load_eu_swarm_modules
+from internet_explorer.runtime_bootstrap import cleanup_stale_browser_tmp_dirs
 from internet_explorer.telemetry import Telemetry
 
 VALID_OUTCOMES = {
@@ -36,6 +37,7 @@ TRANSIENT_DELEGATE_ERROR_MARKERS = (
     "websocket connection closed",
     "no close frame received or sent",
     "did not receive a valid http response",
+    "no space left on device",
 )
 MAX_TRANSIENT_DELEGATE_RETRIES = 1
 
@@ -142,6 +144,22 @@ class BrowserDelegationManager:
                         )
                     return result
                 except Exception as exc:
+                    error_text = _exception_to_text(exc).strip().lower()
+                    if "no space left on device" in error_text:
+                        cleanup = cleanup_stale_browser_tmp_dirs(
+                            older_than_minutes=30,
+                            skip_if_ie_worker_running=False,
+                        )
+                        self.telemetry.emit(
+                            phase="browser_delegate",
+                            actor="system",
+                            url_id=url_id,
+                            input_payload={"url": url, "attempt": attempt},
+                            output_summary=cleanup,
+                            decision="delegate_tmp_cleanup",
+                            error_code=type(exc).__name__,
+                        )
+
                     if self._should_retry_delegate_error(exc=exc, attempt=attempt, max_attempts=max_attempts):
                         self.telemetry.emit(
                             phase="browser_delegate",
