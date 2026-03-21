@@ -195,6 +195,25 @@ def test_browser_delegate_uses_planner_and_native_browser_use(monkeypatch, tmp_p
     assert result.recipe[1].action == "click"
 
 
+def test_browser_delegate_prompt_includes_search_flow_discipline(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    manager = BrowserDelegationManager.__new__(BrowserDelegationManager)
+    manager.config = config
+
+    task = manager._build_browser_task(
+        intent="find RFP websites for data annotation",
+        start_url="https://example.com/procurement",
+        initial_links=["https://example.com/search", "https://example.com/vendors"],
+        plan_task="Inspect the site and return strict JSON.",
+    )
+
+    assert "loaded search or listing page with visible controls is not a blank-page failure state" in task
+    assert "Before leaving a loaded search/listing workflow page or calling `done`" in task
+    assert "Do not jump to Google or DuckDuckGo" in task
+    assert "Set Your Search Criteria" in task
+
+
 def test_browser_delegate_prefers_gemini_when_available(monkeypatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
     config.gemini_api_key = "gemini-key"
