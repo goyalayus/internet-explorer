@@ -1,0 +1,36 @@
+Internet Explorer Agent Observations
+====================================
+
+Updated: 2026-03-21
+
+Run: run_f0ed08cccf6e431aac0253017c19b60b (stopped for fix/restart)
+- Symptom: run progress stalled after a browser delegation planner step.
+- Evidence: latest event stayed at `browser_delegate planner_output`; no new `final_decision` events for several minutes.
+- Root issue: browser delegate cleanup could block indefinitely on close/stop paths.
+- Fix applied: commit `3b0ad77` adds timeout-bounded cleanup for agent close, browser stop, and llm close.
+
+Run: run_f0ed08cccf6e431aac0253017c19b60b
+- Pattern: browser agent sometimes escaped to external search too quickly and hit CAPTCHA.
+- Example behavior:
+  - Google/DuckDuckGo detours triggered from weak/failed internal navigation.
+  - CAPTCHA then forced an early `done(success=false)` and judge FAIL.
+- Prompt/tool direction:
+  - Keep strengthening internal-site-first behavior.
+  - Preserve explicit "captcha => stop and report blocked" rule (already in place).
+
+Run: run_f0ed08cccf6e431aac0253017c19b60b and run_58e58f3a181d4532bb60e3226878b5a1
+- Pattern: heavy `site_graph sitemap_fetch_failed ConnectTimeout` bursts.
+- Impact:
+  - Long stretches with low `final_decision` throughput.
+  - Elevated CPU/load during bootstrap-heavy phases.
+- Working theory:
+  - Some domains trigger expensive sitemap/root bootstrap attempts that time out repeatedly before useful page fetch starts.
+- Next candidates:
+  - Introduce smarter timeout-budget behavior in sitemap bootstrap path.
+  - Keep bootstrap useful, but avoid repeated low-yield timeout loops.
+
+Run: run_58e58f3a181d4532bb60e3226878b5a1 (current)
+- Health snapshot:
+  - planning cache was reused (`planning_cache cache_hit`), so strategy/query/serp regen was avoided.
+  - chromium process count and memory pressure are much lower than the pre-fix stalled attempt.
+  - run is progressing but still shows timeout-heavy site graph bootstrap on some domains.
