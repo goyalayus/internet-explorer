@@ -183,6 +183,20 @@ class IntentDiscoveryService:
 
             self.persistence.update_run(run_id, summary.model_dump())
             return summary
+        except asyncio.CancelledError as exc:
+            summary.status = "failed"
+            summary.error = "run_cancelled"
+            summary.finished_at = datetime.utcnow()
+            summary.completed_at = summary.finished_at
+            self.persistence.update_run(run_id, summary.model_dump())
+            telemetry.emit(
+                phase="run_cancelled",
+                actor="system",
+                output_summary={"error": str(exc)},
+                decision="cancelled",
+                error_code=type(exc).__name__,
+            )
+            raise
         except Exception as exc:
             summary.status = "failed"
             summary.error = str(exc)

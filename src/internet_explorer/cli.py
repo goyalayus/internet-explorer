@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import signal
 from pathlib import Path
 
 from internet_explorer.config import AppConfig
@@ -55,10 +56,14 @@ async def _run(intent: str, print_config: bool, vpn_start: bool, vpn_stop: bool,
 
 
 def main() -> None:
+    def _handle_sigterm(_signum, _frame):  # noqa: ANN001
+        raise KeyboardInterrupt("SIGTERM received")
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
     parser = build_parser()
     args = parser.parse_args()
-    raise SystemExit(
-        asyncio.run(
+    try:
+        exit_code = asyncio.run(
             _run(
                 intent=args.intent or "",
                 print_config=args.print_config,
@@ -68,7 +73,9 @@ def main() -> None:
                 vpn_check_docdb=args.vpn_check_docdb,
             )
         )
-    )
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

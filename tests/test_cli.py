@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 from internet_explorer import cli
@@ -33,3 +35,18 @@ async def test_cli_prefers_process_env_overrides(monkeypatch) -> None:
 
     assert exit_code == 0
     assert captured["prefer_process_env"] is True
+
+
+def test_cli_exits_130_on_keyboard_interrupt(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["internet-explorer", "--print-config"])
+
+    def _fake_asyncio_run(coro):  # noqa: ANN001
+        coro.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.asyncio, "run", _fake_asyncio_run)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 130
