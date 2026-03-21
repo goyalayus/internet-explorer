@@ -126,6 +126,7 @@ class AppConfig(BaseModel):
     url_batch_size: int = 40
     vpn_start_script: Path | None = None
     auto_start_vpn: bool = True
+    allow_parallel_workers: bool = False
     vpn_ovpn_config: Path | None = None
     vpn_defaults_file: Path | None = None
     vpn_docdb_host: str = ""
@@ -324,6 +325,7 @@ class AppConfig(BaseModel):
             url_batch_size=int(env_value("URL_BATCH_SIZE", "40")),
             vpn_start_script=vpn_start_script,
             auto_start_vpn=env_value("AUTO_START_VPN", "true").lower() == "true",
+            allow_parallel_workers=env_value("ALLOW_PARALLEL_WORKERS", "false").lower() == "true",
             vpn_ovpn_config=vpn_ovpn_config,
             vpn_defaults_file=vpn_defaults_file,
             vpn_docdb_host=vpn_docdb_host,

@@ -3,12 +3,51 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import signal
+import subprocess
 from pathlib import Path
 
 from internet_explorer.config import AppConfig
 from internet_explorer.service import IntentDiscoveryService
 from internet_explorer.vpn import GenericVpnManager
+
+
+def _find_existing_workers() -> list[int]:
+    this_pid = os.getpid()
+    try:
+        output = subprocess.run(  # noqa: S603
+            ["ps", "-eo", "pid,args"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).stdout or ""
+    except Exception:
+        return []
+
+    existing: list[int] = []
+    for line in output.splitlines()[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid_text, command = parts
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid == this_pid:
+            continue
+        lowered = command.lower()
+        if "internet_explorer.cli" not in lowered:
+            continue
+        if "python" not in lowered:
+            continue
+        existing.append(pid)
+    return existing
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,6 +82,15 @@ async def _run(intent: str, print_config: bool, vpn_start: bool, vpn_stop: bool,
             status = await asyncio.to_thread(manager.status, check_docdb=vpn_check_docdb)
         print(json.dumps(status.model_dump(mode="json"), indent=2))
         return 0
+    if not config.allow_parallel_workers:
+        existing_workers = _find_existing_workers()
+        if existing_workers:
+            worker_list = ", ".join(str(pid) for pid in existing_workers[:10])
+            raise SystemExit(
+                "Another internet-explorer worker is already running "
+                f"(pid(s): {worker_list}). "
+                "Stop existing workers or set ALLOW_PARALLEL_WORKERS=true to override."
+            )
     if not config.intent:
         raise SystemExit("Intent is required. Pass --intent or set INTENT in env.")
     if config.auto_start_vpn:

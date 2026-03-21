@@ -74,6 +74,7 @@ Important behavior:
 - `MONGODB_TLS_CA_FILE` defaults to `certs/global-bundle.pem` when that file exists, so Mongo TLS does not need a hardcoded external path inside `MONGODB_URI`.
 - `MAX_BROWSER_CONCURRENCY=0` means unlimited.
 - `MAX_URL_CONCURRENCY=0` means unlimited.
+- `ALLOW_PARALLEL_WORKERS=false` (default) blocks accidental double-starts; set it to `true` only when you intentionally want multiple workers.
 - `BROWSER_USE_LLM_MODEL` lets you pin the delegated browser agent to a specific browser-use model alias. If left blank, browser delegation prefers Gemini when Gemini keys are configured.
 - `CANDIDATE_START_MODE=domain_homepage` means one candidate per unique domain and the normal agent starts from the domain homepage.
 - `CANDIDATE_START_MODE=first_result_url` means one candidate per unique domain but the normal agent starts from the first SERP URL seen for that domain.

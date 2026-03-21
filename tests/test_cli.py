@@ -9,6 +9,7 @@ class _ConfigStub:
     def __init__(self) -> None:
         self.intent = ""
         self.auto_start_vpn = False
+        self.allow_parallel_workers = False
 
     def model_dump(self, mode: str = "json"):  # noqa: ARG002
         return {"intent": self.intent}
@@ -50,3 +51,24 @@ def test_cli_exits_130_on_keyboard_interrupt(monkeypatch) -> None:
         cli.main()
 
     assert exc.value.code == 130
+
+
+@pytest.mark.asyncio
+async def test_cli_blocks_when_another_worker_is_running(monkeypatch) -> None:
+    def _fake_from_env(root, *, env_overrides=None, prefer_process_env=False):  # noqa: ANN001, ARG001
+        config = _ConfigStub()
+        config.intent = "find sources"
+        return config
+
+    monkeypatch.setattr(cli.AppConfig, "from_env", _fake_from_env)
+    monkeypatch.setattr(cli, "_find_existing_workers", lambda: [12345])
+
+    with pytest.raises(SystemExit, match="ALLOW_PARALLEL_WORKERS=true"):
+        await cli._run(
+            intent="find sources",
+            print_config=False,
+            vpn_start=False,
+            vpn_stop=False,
+            vpn_status=False,
+            vpn_check_docdb=False,
+        )
