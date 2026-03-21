@@ -45,3 +45,12 @@ def test_tool_inventory_ignores_generic_overlap_terms() -> None:
 
     assert match.duplicate_detected is False
     assert match.matched_tools == []
+
+
+def test_tool_inventory_ignores_generic_api_tokens() -> None:
+    inventory = ToolInventory(["rapidapi", "linkedin_api", "facebook_api"])
+
+    match = inventory.match_terms(["Developer API", "API docs", "https://api.example.com/docs"])
+
+    assert match.duplicate_detected is False
+    assert match.matched_tools == []

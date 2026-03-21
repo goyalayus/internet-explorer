@@ -109,8 +109,11 @@ class _History:
 
 
 class _BrowserUseAgent:
+    last_kwargs = None
+
     def __init__(self, **kwargs) -> None:
         self.kwargs = kwargs
+        type(self).last_kwargs = kwargs
 
     async def run(self, max_steps: int):
         return _History()
@@ -143,8 +146,11 @@ class _HistoryAliasShape:
 
 
 class _BrowserUseAgentAliasShape:
+    last_kwargs = None
+
     def __init__(self, **kwargs) -> None:
         self.kwargs = kwargs
+        type(self).last_kwargs = kwargs
 
     async def run(self, max_steps: int):
         return _HistoryAliasShape()
@@ -195,6 +201,9 @@ def test_browser_delegate_uses_planner_and_native_browser_use(monkeypatch, tmp_p
     assert "Initial links list" in planning_task
     assert "https://example.com/docs" in planning_task
     assert "https://example.com/pricing" in planning_task
+    browser_task = str(_BrowserUseAgent.last_kwargs["task"])
+    assert "Stay anchored to URLs you actually opened in this session" in browser_task
+    assert "Do not spend more than 2 consecutive actions trying to revive the same empty page" in browser_task
 
     assert result.classification == "api_available"
     assert result.useful is True

@@ -7,6 +7,29 @@ from pathlib import Path
 
 
 TOKEN_PATTERN = re.compile(r"[a-z0-9]{2,}")
+IGNORED_MATCH_TOKENS = {
+    "api",
+    "apis",
+    "data",
+    "docs",
+    "documentation",
+    "developer",
+    "developers",
+    "platform",
+    "portal",
+    "service",
+    "services",
+    "home",
+    "homepage",
+    "contact",
+    "pricing",
+    "app",
+    "www",
+    "com",
+    "net",
+    "org",
+    "io",
+}
 ALIAS_OVERRIDES: dict[str, set[str]] = {
     "coresignal": {"core signal"},
     "rapidapi": {"rapid api"},
@@ -107,7 +130,7 @@ def _build_match_pattern(value: str) -> _MatchPattern | None:
         return None
 
     compact = re.sub(r"[^a-z0-9]", "", normalized)
-    tokens = tuple(TOKEN_PATTERN.findall(normalized))
+    tokens = tuple(token for token in TOKEN_PATTERN.findall(normalized) if token not in IGNORED_MATCH_TOKENS)
     if not compact and not tokens:
         return None
 
@@ -117,7 +140,16 @@ def _build_match_pattern(value: str) -> _MatchPattern | None:
 def _build_candidate_term(value: str) -> _CandidateTerm:
     normalized = str(value or "").strip().lower()
     compact = re.sub(r"[^a-z0-9]", "", normalized)
-    tokens = frozenset(TOKEN_PATTERN.findall(normalized))
+    raw_tokens = TOKEN_PATTERN.findall(normalized)
+    token_set = {token for token in raw_tokens if token not in IGNORED_MATCH_TOKENS}
+
+    # Preserve key split aliases like "rapid api" -> "rapidapi" without matching broad generic terms.
+    for left, right in zip(raw_tokens, raw_tokens[1:], strict=False):
+        compact_pair = f"{left}{right}"
+        if compact_pair and compact_pair not in IGNORED_MATCH_TOKENS:
+            token_set.add(compact_pair)
+
+    tokens = frozenset(token_set)
     return _CandidateTerm(normalized=normalized, compact=compact, tokens=tokens)
 
 
