@@ -183,6 +183,16 @@ class AppConfig(BaseModel):
             raise ValueError(f"DISCOVERY_CACHE_MODE must be one of: {allowed_values}")
         return mode
 
+    @field_validator("candidate_start_mode")
+    @classmethod
+    def _validate_candidate_start_mode(cls, value: str) -> str:
+        mode = (value or "").strip().lower()
+        allowed = {"domain_homepage", "first_result_url"}
+        if mode not in allowed:
+            allowed_values = ", ".join(sorted(allowed))
+            raise ValueError(f"CANDIDATE_START_MODE must be one of: {allowed_values}")
+        return mode
+
     @classmethod
     def from_env(
         cls,
