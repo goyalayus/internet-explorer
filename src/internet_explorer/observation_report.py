@@ -20,7 +20,6 @@ def build_run_observation_report(
         if url_id:
             by_url[url_id].append(event)
 
-    summary_by_url = {str(item.get("url_id")): item for item in url_summaries}
     lines: list[str] = []
 
     lines.append(f"run_id: {run_doc.get('run_id', '')}")

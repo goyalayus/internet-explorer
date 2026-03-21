@@ -165,7 +165,7 @@ class IntentDiscoveryService:
                     },
                 )
 
-            evaluations = await self._evaluate_candidates(
+            await self._evaluate_candidates(
                 intent,
                 deduped_candidates,
                 evaluator,
