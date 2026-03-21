@@ -17,7 +17,7 @@ def _find_existing_workers() -> list[int]:
     this_pid = os.getpid()
     try:
         output = subprocess.run(  # noqa: S603
-            ["ps", "-eo", "pid,args"],
+            ["ps", "-eo", "pid=,comm=,args="],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -27,24 +27,24 @@ def _find_existing_workers() -> list[int]:
         return []
 
     existing: list[int] = []
-    for line in output.splitlines()[1:]:
+    for line in output.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
-        parts = stripped.split(None, 1)
-        if len(parts) != 2:
+        parts = stripped.split(None, 2)
+        if len(parts) != 3:
             continue
-        pid_text, command = parts
+        pid_text, comm, command = parts
         try:
             pid = int(pid_text)
         except ValueError:
             continue
         if pid == this_pid:
             continue
+        if not comm.lower().startswith("python"):
+            continue
         lowered = command.lower()
         if "internet_explorer.cli" not in lowered:
-            continue
-        if "python" not in lowered:
             continue
         existing.append(pid)
     return existing

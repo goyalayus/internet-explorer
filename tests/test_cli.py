@@ -72,3 +72,19 @@ async def test_cli_blocks_when_another_worker_is_running(monkeypatch) -> None:
             vpn_status=False,
             vpn_check_docdb=False,
         )
+
+
+def test_find_existing_workers_ignores_bash_wrappers(monkeypatch) -> None:
+    class _Result:
+        stdout = (
+            "338888 bash bash -c nohup .venv/bin/python -m internet_explorer.cli --intent test\n"
+            "338901 python .venv/bin/python -m internet_explorer.cli --intent test\n"
+            "338902 python3 python3 -m something_else\n"
+        )
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: _Result())
+    monkeypatch.setattr(cli.os, "getpid", lambda: 999999)
+
+    pids = cli._find_existing_workers()
+
+    assert pids == [338901]
