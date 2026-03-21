@@ -1,9 +1,11 @@
 import asyncio
+import time
 from pathlib import Path
 
+import pytest
 from pydantic import BaseModel
 
-from internet_explorer.browser_delegate import BrowserDelegationManager
+from internet_explorer.browser_delegate import BrowserDelegationManager, _maybe_await, _maybe_call_close
 from internet_explorer.config import AppConfig
 
 
@@ -344,3 +346,24 @@ def test_browser_delegate_returns_fallback_on_timeout(monkeypatch, tmp_path: Pat
     assert result.classification == "unknown"
     assert result.useful is False
     assert result.render_path == "browser_delegate_fallback"
+
+
+class _SlowCloser:
+    async def close(self):
+        await asyncio.sleep(2)
+
+
+@pytest.mark.asyncio
+async def test_maybe_call_close_times_out() -> None:
+    started = time.perf_counter()
+    await _maybe_call_close(_SlowCloser(), timeout_seconds=1)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.6
+
+
+@pytest.mark.asyncio
+async def test_maybe_await_times_out() -> None:
+    started = time.perf_counter()
+    await _maybe_await(asyncio.sleep(2), timeout_seconds=1)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.6

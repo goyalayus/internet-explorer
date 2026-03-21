@@ -290,14 +290,15 @@ class BrowserDelegationManager:
                 "extracted_content": history.extracted_content() if hasattr(history, "extracted_content") else [],
             }
         finally:
+            cleanup_timeout = max(1, min(20, self.config.browser_delegate_timeout_seconds))
             try:
                 if agent is not None:
-                    await _maybe_call_close(agent)
+                    await _maybe_call_close(agent, timeout_seconds=cleanup_timeout)
             finally:
                 try:
-                    await browser.stop()
+                    await _maybe_await(browser.stop(), timeout_seconds=cleanup_timeout)
                 finally:
-                    await _maybe_call_close(llm)
+                    await _maybe_call_close(llm, timeout_seconds=cleanup_timeout)
 
     def _create_browser_use_llm(self):
         get_llm_by_name = self.modules["get_browser_use_llm_by_name"]
@@ -605,7 +606,7 @@ def _exception_to_text(exc: Exception) -> str:
     return type(exc).__name__
 
 
-async def _maybe_call_close(target: Any) -> None:
+async def _maybe_call_close(target: Any, *, timeout_seconds: int = 10) -> None:
     if target is None:
         return
     for method_name in ("aclose", "close"):
@@ -615,7 +616,15 @@ async def _maybe_call_close(target: Any) -> None:
         try:
             result = method()
             if inspect.isawaitable(result):
-                await result
+                await asyncio.wait_for(result, timeout=max(1, timeout_seconds))
         except Exception:
             return
         return
+
+
+async def _maybe_await(value: Any, *, timeout_seconds: int = 10) -> None:
+    if inspect.isawaitable(value):
+        try:
+            await asyncio.wait_for(value, timeout=max(1, timeout_seconds))
+        except Exception:
+            return
