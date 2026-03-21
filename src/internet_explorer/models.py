@@ -257,6 +257,7 @@ class RunSummary(BaseModel):
     candidate_start_mode: str = ""
     started_at: datetime
     finished_at: datetime | None = None
+    completed_at: datetime | None = None
     strategy_count: int = 0
     query_count: int = 0
     raw_result_count: int = 0

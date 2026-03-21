@@ -178,15 +178,17 @@ class IntentDiscoveryService:
             summary.useful_source_count = summary.useful_url_count
             summary.browser_peak_active = browser_manager.peak
             summary.finished_at = datetime.utcnow()
+            summary.completed_at = summary.finished_at
             summary.status = "completed"
 
-            self.persistence.update_run(run_id, summary.model_dump(mode="json"))
+            self.persistence.update_run(run_id, summary.model_dump())
             return summary
         except Exception as exc:
             summary.status = "failed"
             summary.error = str(exc)
             summary.finished_at = datetime.utcnow()
-            self.persistence.update_run(run_id, summary.model_dump(mode="json"))
+            summary.completed_at = summary.finished_at
+            self.persistence.update_run(run_id, summary.model_dump())
             telemetry.emit(
                 phase="run_failed",
                 actor="system",
