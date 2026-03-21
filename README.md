@@ -50,6 +50,12 @@ That command:
 - starts VPN
 - verifies Mongo reachability
 
+For repeatable domain experiments (stop old worker, bootstrap runtime, start new run), use:
+
+```bash
+./scripts/start_domain_run.sh
+```
+
 Export a readable post-run path report from Mongo:
 
 ```bash
