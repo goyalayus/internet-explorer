@@ -29,7 +29,12 @@ class IntentDiscoveryService:
 
     async def run(self, intent: str) -> RunSummary:
         run_id = f"run_{uuid.uuid4().hex}"
-        summary = RunSummary(run_id=run_id, intent=intent, started_at=datetime.utcnow())
+        summary = RunSummary(
+            run_id=run_id,
+            intent=intent,
+            candidate_start_mode=self.config.candidate_start_mode,
+            started_at=datetime.utcnow(),
+        )
         telemetry = Telemetry(self.persistence, run_id=run_id, intent_id=f"intent_{uuid.uuid4().hex[:8]}")
         vpn_manager = GenericVpnManager(self.config)
         vpn_started_by_service = False

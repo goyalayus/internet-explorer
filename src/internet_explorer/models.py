@@ -254,6 +254,7 @@ class UrlEvaluation(BaseModel):
 class RunSummary(BaseModel):
     run_id: str
     intent: str
+    candidate_start_mode: str = ""
     started_at: datetime
     finished_at: datetime | None = None
     strategy_count: int = 0
