@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import shutil
 import subprocess
 import time
@@ -24,6 +25,13 @@ BROWSER_TMP_PREFIXES = (
     "browser-use-downloads-",
     "browser_use_agent_",
 )
+BROWSER_PROCESS_MARKERS = (
+    "--user-data-dir=/tmp/browser-use-user-data-dir-",
+    "--user-data-dir=/tmp/browser-use-downloads-",
+    "/tmp/browser-use-user-data-dir-",
+    "/tmp/browser-use-downloads-",
+    "/tmp/browser_use_agent_",
+)
 
 
 class RuntimeBootstrapResult(BaseModel):
@@ -39,6 +47,7 @@ class RuntimeBootstrapResult(BaseModel):
     vpn_status_after: dict[str, Any] | None = None
     mongo_reachable: bool | None = None
     mongo_message: str = ""
+    browser_process_cleanup: dict[str, Any] = Field(default_factory=dict)
     tmp_cleanup: dict[str, Any] = Field(default_factory=dict)
     error_type: str = ""
     error: str = ""
@@ -98,6 +107,96 @@ def _safe_dir_size_bytes(path: Path) -> int:
             except OSError:
                 continue
     return total
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def cleanup_stale_browser_processes(*, skip_if_ie_worker_running: bool = True) -> dict[str, Any]:
+    worker_running = _is_ie_worker_running() if skip_if_ie_worker_running else False
+    result: dict[str, Any] = {
+        "worker_running": worker_running,
+        "matched_count": 0,
+        "term_sent_count": 0,
+        "kill_sent_count": 0,
+        "already_gone_count": 0,
+        "failed_count": 0,
+        "skipped_reason": "",
+        "error": "",
+    }
+    if worker_running:
+        result["skipped_reason"] = "active_worker_detected"
+        return result
+
+    try:
+        ps_output = subprocess.run(  # noqa: S603
+            ["ps", "-eo", "pid,args"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).stdout or ""
+    except Exception as exc:  # pragma: no cover - defensive branch
+        result["skipped_reason"] = "ps_failed"
+        result["error"] = str(exc)
+        return result
+
+    current_pid = os.getpid()
+    candidate_pids: list[int] = []
+    for line in ps_output.splitlines()[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid_text, command = parts
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid <= 1 or pid == current_pid:
+            continue
+        lowered = command.lower()
+        if "chrome" not in lowered and "chromium" not in lowered:
+            continue
+        if not any(marker in lowered for marker in BROWSER_PROCESS_MARKERS):
+            continue
+        candidate_pids.append(pid)
+
+    result["matched_count"] = len(candidate_pids)
+
+    for pid in candidate_pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            result["term_sent_count"] += 1
+        except ProcessLookupError:
+            result["already_gone_count"] += 1
+        except Exception:
+            result["failed_count"] += 1
+
+    if candidate_pids:
+        time.sleep(0.2)
+
+    for pid in candidate_pids:
+        if not _pid_exists(pid):
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            result["kill_sent_count"] += 1
+        except ProcessLookupError:
+            result["already_gone_count"] += 1
+        except Exception:
+            result["failed_count"] += 1
+
+    return result
 
 
 def cleanup_stale_browser_tmp_dirs(
@@ -245,6 +344,7 @@ def run_runtime_bootstrap(
             )
         ],
     )
+    result.browser_process_cleanup = cleanup_stale_browser_processes()
     result.tmp_cleanup = cleanup_stale_browser_tmp_dirs()
 
     try:

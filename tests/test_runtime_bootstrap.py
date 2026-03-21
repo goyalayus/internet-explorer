@@ -4,6 +4,7 @@ import os
 from internet_explorer.config import _derive_docdb_endpoint_from_mongodb_uri
 from internet_explorer.runtime_bootstrap import apply_env_updates
 from internet_explorer.runtime_bootstrap import build_runtime_env_updates
+from internet_explorer.runtime_bootstrap import cleanup_stale_browser_processes
 from internet_explorer.runtime_bootstrap import cleanup_stale_browser_tmp_dirs
 from internet_explorer.runtime_bootstrap import run_runtime_bootstrap
 
@@ -286,3 +287,49 @@ def test_cleanup_stale_browser_tmp_dirs_skips_when_worker_running(monkeypatch, t
 
     assert result["skipped_reason"] == "active_worker_detected"
     assert old_dir.exists() is True
+
+
+def test_cleanup_stale_browser_processes_skips_when_worker_running(monkeypatch) -> None:
+    monkeypatch.setattr("internet_explorer.runtime_bootstrap._is_ie_worker_running", lambda: True)
+
+    result = cleanup_stale_browser_processes(skip_if_ie_worker_running=True)
+
+    assert result["skipped_reason"] == "active_worker_detected"
+    assert result["matched_count"] == 0
+    assert result["term_sent_count"] == 0
+    assert result["kill_sent_count"] == 0
+
+
+def test_cleanup_stale_browser_processes_terminates_matching_chrome(monkeypatch) -> None:
+    monkeypatch.setattr("internet_explorer.runtime_bootstrap._is_ie_worker_running", lambda: False)
+    monkeypatch.setattr("internet_explorer.runtime_bootstrap.os.getpid", lambda: 9999)
+
+    class _Result:
+        stdout = (
+            "    PID COMMAND\n"
+            "    101 /usr/bin/chrome --user-data-dir=/tmp/browser-use-user-data-dir-abc\n"
+            "    102 /usr/bin/chromium --user-data-dir=/tmp/browser-use-user-data-dir-def\n"
+            "    103 /usr/bin/chrome --user-data-dir=/tmp/regular-profile\n"
+        )
+
+    monkeypatch.setattr("internet_explorer.runtime_bootstrap.subprocess.run", lambda *args, **kwargs: _Result())
+    monkeypatch.setattr("internet_explorer.runtime_bootstrap.time.sleep", lambda *args, **kwargs: None)
+
+    calls: list[tuple[int, int]] = []
+
+    def _fake_kill(pid: int, sig: int) -> None:
+        calls.append((pid, sig))
+
+    monkeypatch.setattr("internet_explorer.runtime_bootstrap.os.kill", _fake_kill)
+
+    still_alive = {102}
+    monkeypatch.setattr("internet_explorer.runtime_bootstrap._pid_exists", lambda pid: pid in still_alive)
+
+    result = cleanup_stale_browser_processes(skip_if_ie_worker_running=False)
+
+    assert result["matched_count"] == 2
+    assert result["term_sent_count"] == 2
+    assert result["kill_sent_count"] == 1
+    assert calls[0][0] == 101
+    assert calls[1][0] == 102
+    assert calls[2][0] == 102
