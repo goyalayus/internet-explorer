@@ -268,7 +268,7 @@ class BrowserDelegationManager:
             start_url=plan.start_url,
             intent=intent,
             url_id=url_id,
-            max_steps=plan.max_steps,
+            max_steps=self._resolve_delegate_max_steps(plan.max_steps, url_id=url_id),
         )
         return self._to_delegate_result(
             session_name=session_name,
@@ -317,6 +317,7 @@ class BrowserDelegationManager:
 
     def _fallback_plan(self, *, start_url: str, intent: str, error: Exception):
         SmartScraperPlan = self.modules["SmartScraperPlan"]
+        fallback_max_steps = max(1, min(20, self.config.browser_delegate_max_steps))
         payload = {
             "planning_summary": "Fallback plan due to planner error.",
             "browser_task": (
@@ -324,7 +325,7 @@ class BrowserDelegationManager:
                 "for datasource usefulness."
             ),
             "start_url": start_url,
-            "max_steps": 20,
+            "max_steps": fallback_max_steps,
             "assumptions": [
                 "Planner unavailable; using direct browser exploration fallback.",
                 f"Planner error: {_exception_to_text(error)}",
@@ -332,6 +333,21 @@ class BrowserDelegationManager:
             ],
         }
         return SmartScraperPlan.model_validate(payload)
+
+    def _resolve_delegate_max_steps(self, planned_steps: int, *, url_id: str) -> int:
+        configured_max = max(1, int(self.config.browser_delegate_max_steps))
+        requested_steps = max(1, int(planned_steps))
+        resolved_steps = min(requested_steps, configured_max)
+        if resolved_steps != requested_steps:
+            self.telemetry.emit(
+                phase="browser_delegate",
+                actor="system",
+                url_id=url_id,
+                input_payload={"planned_max_steps": requested_steps, "configured_max_steps": configured_max},
+                output_summary={"resolved_max_steps": resolved_steps},
+                decision="delegate_steps_clamped",
+            )
+        return resolved_steps
 
     async def _run_browser_use_native(
         self,

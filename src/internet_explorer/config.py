@@ -122,6 +122,7 @@ class AppConfig(BaseModel):
     discovery_cache_key: str = ""
     max_browser_concurrency: int = 0
     browser_delegate_timeout_seconds: int = 120
+    browser_delegate_max_steps: int = 12
     max_url_concurrency: int = 0
     url_batch_size: int = 40
     vpn_start_script: Path | None = None
@@ -193,6 +194,13 @@ class AppConfig(BaseModel):
             allowed_values = ", ".join(sorted(allowed))
             raise ValueError(f"CANDIDATE_START_MODE must be one of: {allowed_values}")
         return mode
+
+    @field_validator("browser_delegate_max_steps")
+    @classmethod
+    def _validate_browser_delegate_max_steps(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("BROWSER_DELEGATE_MAX_STEPS must be >= 1")
+        return value
 
     @classmethod
     def from_env(
@@ -321,6 +329,7 @@ class AppConfig(BaseModel):
             discovery_cache_key=env_value("DISCOVERY_CACHE_KEY"),
             max_browser_concurrency=int(env_value("MAX_BROWSER_CONCURRENCY", "0")),
             browser_delegate_timeout_seconds=int(env_value("BROWSER_DELEGATE_TIMEOUT_SECONDS", "120")),
+            browser_delegate_max_steps=int(env_value("BROWSER_DELEGATE_MAX_STEPS", "12")),
             max_url_concurrency=int(env_value("MAX_URL_CONCURRENCY", "0")),
             url_batch_size=int(env_value("URL_BATCH_SIZE", "40")),
             vpn_start_script=vpn_start_script,

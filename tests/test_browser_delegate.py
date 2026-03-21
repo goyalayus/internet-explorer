@@ -114,12 +114,14 @@ class _History:
 
 class _BrowserUseAgent:
     last_kwargs = None
+    last_run_max_steps = None
 
     def __init__(self, **kwargs) -> None:
         self.kwargs = kwargs
         type(self).last_kwargs = kwargs
 
     async def run(self, max_steps: int):
+        type(self).last_run_max_steps = max_steps
         return _History()
 
 
@@ -166,6 +168,18 @@ class _BrowserUseAgentTimeout:
 
     async def run(self, max_steps: int):
         raise asyncio.TimeoutError()
+
+
+class _PlannerAgentLargeSteps(_PlannerAgent):
+    def execute(self, task: str):
+        self.captured["planning_task"] = task
+        return {
+            "planning_summary": "use native browser-use",
+            "browser_task": "inspect source deeply and return JSON",
+            "start_url": "https://example.com/start",
+            "max_steps": 30,
+            "assumptions": ["test assumption"],
+        }
 
 
 def test_browser_delegate_uses_planner_and_native_browser_use(monkeypatch, tmp_path: Path) -> None:
@@ -217,6 +231,42 @@ def test_browser_delegate_uses_planner_and_native_browser_use(monkeypatch, tmp_p
     assert "https://example.com/openapi.json" in result.relevant_links
     assert result.recipe[0].action == "navigate"
     assert result.recipe[1].action == "click"
+
+
+def test_browser_delegate_clamps_planner_steps_to_config_limit(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.browser_delegate_max_steps = 12
+    telemetry = _TelemetryStub()
+    captured: dict[str, object] = {}
+
+    def _create_agent(**kwargs):
+        captured["planner_create_kwargs"] = kwargs
+        return _PlannerAgentLargeSteps(captured)
+
+    monkeypatch.setattr(
+        "internet_explorer.browser_delegate.load_eu_swarm_modules",
+        lambda config: {
+            "AzureOpenAIProvider": _AzureOpenAIProvider,
+            "create_agent": _create_agent,
+            "SmartScraperPlan": _SmartScraperPlan,
+            "BrowserUseAgent": _BrowserUseAgent,
+            "BrowserUseBrowser": _Browser,
+            "get_browser_use_llm_by_name": lambda name: object(),
+        },
+    )
+
+    manager = BrowserDelegationManager(config, telemetry, lambda update: None)
+    result = manager._run_delegate_sync(
+        "session_clamp",
+        "https://example.com/start",
+        "find procurement api docs",
+        "url_clamp",
+        [],
+    )
+
+    assert _BrowserUseAgent.last_run_max_steps == 12
+    assert result.classification == "api_available"
+    assert any(event.get("decision") == "delegate_steps_clamped" for event in telemetry.events)
 
 
 def test_browser_delegate_prompt_includes_search_flow_discipline(tmp_path: Path) -> None:
