@@ -104,7 +104,13 @@ class BrowserDelegationManager:
             decision="delegate_start",
         )
         try:
-            result = await asyncio.to_thread(self._run_delegate_sync, session_name, url, intent, url_id, initial_links)
+            result = await self._run_delegate_async(
+                session_name=session_name,
+                url=url,
+                intent=intent,
+                url_id=url_id,
+                initial_links=initial_links,
+            )
             self.telemetry.emit(
                 phase="browser_delegate",
                 actor="browser_agent",
@@ -159,8 +165,33 @@ class BrowserDelegationManager:
         url_id: str,
         initial_links: list[str],
     ) -> BrowserDelegateResult:
+        return asyncio.run(
+            self._run_delegate_async(
+                session_name=session_name,
+                url=url,
+                intent=intent,
+                url_id=url_id,
+                initial_links=initial_links,
+            )
+        )
+
+    async def _run_delegate_async(
+        self,
+        *,
+        session_name: str,
+        url: str,
+        intent: str,
+        url_id: str,
+        initial_links: list[str],
+    ) -> BrowserDelegateResult:
         try:
-            plan = self._plan_browser_task(intent=intent, start_url=url, url_id=url_id, initial_links=initial_links)
+            plan = await asyncio.to_thread(
+                self._plan_browser_task,
+                intent=intent,
+                start_url=url,
+                url_id=url_id,
+                initial_links=initial_links,
+            )
         except Exception as exc:
             plan = self._fallback_plan(start_url=url, intent=intent, error=exc)
             self.telemetry.emit(
@@ -172,14 +203,17 @@ class BrowserDelegationManager:
                 decision="planner_fallback",
                 error_code=type(exc).__name__,
             )
-        native_result = asyncio.run(
-            self._run_browser_use_native(
-                browser_task=self._build_browser_task(intent=intent, start_url=plan.start_url, initial_links=initial_links, plan_task=plan.browser_task),
-                start_url=plan.start_url,
+        native_result = await self._run_browser_use_native(
+            browser_task=self._build_browser_task(
                 intent=intent,
-                url_id=url_id,
-                max_steps=plan.max_steps,
-            )
+                start_url=plan.start_url,
+                initial_links=initial_links,
+                plan_task=plan.browser_task,
+            ),
+            start_url=plan.start_url,
+            intent=intent,
+            url_id=url_id,
+            max_steps=plan.max_steps,
         )
         return self._to_delegate_result(
             session_name=session_name,
