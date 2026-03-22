@@ -34,6 +34,38 @@ Queries should help discover sites, portals, APIs, developer docs, datasets, pro
 Return only JSON.
 """
 
+PROCUREMENT_INTENT_MARKERS = (
+    "rfp",
+    "tender",
+    "procurement",
+    "solicitation",
+    "bid",
+    "bids",
+    "contract opportunity",
+    "contract opportunities",
+)
+PROCUREMENT_QUERY_MARKERS = (
+    "rfp",
+    "request for proposal",
+    "tender",
+    "procurement",
+    "solicitation",
+    "bid",
+    "contract opportunities",
+    "vendor portal",
+)
+QUERY_NOISE_SITE_EXCLUSIONS = (
+    "-site:linkedin.com",
+    "-site:facebook.com",
+    "-site:instagram.com",
+    "-site:x.com",
+    "-site:twitter.com",
+    "-site:youtube.com",
+    "-site:github.com",
+    "-site:readthedocs.io",
+    "-site:medium.com",
+)
+
 FALLBACK_STRATEGY_TEMPLATES: list[tuple[str, str]] = [
     (
         "Government Procurement Portals",
@@ -186,6 +218,10 @@ class StrategyPlanner:
             needed = self.config.queries_per_strategy - len(generated_queries)
             generated_queries.extend(self._fallback_queries(intent, strategy, needed))
         generated_queries = generated_queries[: self.config.queries_per_strategy]
+        generated_queries = _normalize_query_batch(generated_queries)
+        if _intent_requires_procurement_focus(intent):
+            generated_queries = [_ensure_procurement_query_focus(query) for query in generated_queries]
+            generated_queries = _normalize_query_batch(generated_queries)
 
         queries = [
             QueryPlan(
@@ -235,3 +271,36 @@ class StrategyPlanner:
             if query:
                 queries.append(query)
         return queries
+
+
+def _intent_requires_procurement_focus(intent: str) -> bool:
+    text = (intent or "").lower()
+    return any(marker in text for marker in PROCUREMENT_INTENT_MARKERS)
+
+
+def _normalize_query_batch(queries: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for query in queries:
+        value = " ".join((query or "").split()).strip()
+        if value:
+            cleaned.append(value)
+    return cleaned
+
+
+def _ensure_procurement_query_focus(query: str) -> str:
+    text = " ".join((query or "").split()).strip()
+    if not text:
+        return text
+
+    lowered = text.lower()
+    if not any(marker in lowered for marker in PROCUREMENT_QUERY_MARKERS):
+        text = f'{text} ("RFP" OR tender OR procurement OR solicitation)'
+        lowered = text.lower()
+
+    for exclusion in QUERY_NOISE_SITE_EXCLUSIONS:
+        if exclusion in lowered:
+            continue
+        text = f"{text} {exclusion}"
+        lowered = text.lower()
+
+    return " ".join(text.split()).strip()
