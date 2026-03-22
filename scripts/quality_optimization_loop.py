@@ -73,6 +73,16 @@ def _append_line(path: Path, line: str) -> None:
         handle.write(line.rstrip() + "\n")
 
 
+def _close_persistence(persistence: MongoPersistence) -> None:
+    close_fn = getattr(persistence, "close", None)
+    if callable(close_fn):
+        close_fn()
+        return
+    client = getattr(persistence, "client", None)
+    if client is not None and hasattr(client, "close"):
+        client.close()
+
+
 def _is_mongo_connectivity_error(exc: BaseException) -> bool:
     text = f"{type(exc).__name__}: {exc}".lower()
     markers = (
@@ -146,7 +156,7 @@ def _collect_metrics(config: AppConfig, run_id: str) -> QualityMetrics:
             )
         )
     finally:
-        persistence.close()
+        _close_persistence(persistence)
 
     evaluated_count = len(summaries)
     useful_count = 0
@@ -194,7 +204,7 @@ def _latest_run_id_since(config: AppConfig, started_at_utc: datetime) -> str:
         )
         docs = list(row)
     finally:
-        persistence.close()
+        _close_persistence(persistence)
     if not docs:
         return ""
     return str(docs[0].get("run_id") or "")
@@ -208,7 +218,7 @@ def _run_status(config: AppConfig, run_id: str) -> dict[str, Any]:
             {"_id": 0, "status": 1, "error": 1, "evaluated_url_count": 1, "useful_url_count": 1},
         )
     finally:
-        persistence.close()
+        _close_persistence(persistence)
     return doc or {}
 
 
