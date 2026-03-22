@@ -186,6 +186,36 @@ META_RESOURCE_MARKERS = (
     "white paper",
     "readiness report",
 )
+MARKETPLACE_NOISE_MARKERS = (
+    "freelance marketplace",
+    "gig marketplace",
+    "gig platform",
+    "job board",
+    "crowdsource",
+    "crowdsourcing",
+    "micro-rfp",
+    "micro rfp",
+    "outsourcing platform",
+    "freelancer",
+    "upwork",
+    "fiverr",
+    "remote job",
+)
+GOVERNMENT_PROCUREMENT_CONTEXT_MARKERS = (
+    ".gov",
+    "government procurement",
+    "public procurement",
+    "procurement portal",
+    "contract opportunities",
+    "tender portal",
+    "ministry",
+    "federal",
+    "state procurement",
+    "municipal",
+    "authority",
+    "sam.gov",
+    "gem.gov",
+)
 PROCUREMENT_SIGNAL_MARKERS = (
     "rfp",
     "tender",
@@ -1528,6 +1558,16 @@ def _apply_quality_gates(
         decision.notes.append("quality_gate:document_entry_without_surface_demoted")
         return
 
+    if decision.useful and decision.outcome == "data_on_site" and _has_marketplace_noise_hint(
+        reasoning=decision.reasoning,
+        source_evidence=decision.source_evidence,
+    ):
+        decision.useful = False
+        decision.outcome = "irrelevant"
+        decision.relevance_score = min(decision.relevance_score, 0.35)
+        decision.notes.append("quality_gate:marketplace_noise_demoted")
+        return
+
     if (
         decision.useful
         and decision.outcome in {"data_on_site", "api_available"}
@@ -1657,6 +1697,20 @@ def _has_non_indirect_procurement_surface_url(source_evidence: list[SourceEviden
         if any(marker in url for marker in PROCUREMENT_SURFACE_URL_MARKERS):
             return True
     return False
+
+
+def _has_marketplace_noise_hint(*, reasoning: str, source_evidence: list[SourceEvidenceItem]) -> bool:
+    parts = [str(reasoning or "")]
+    for item in source_evidence:
+        parts.append(str(item.url or ""))
+        parts.append(str(item.title or ""))
+        parts.append(str(item.summary or ""))
+    text = " ".join(parts).lower()
+    has_noise = any(marker in text for marker in MARKETPLACE_NOISE_MARKERS)
+    if not has_noise:
+        return False
+    has_government_context = any(marker in text for marker in GOVERNMENT_PROCUREMENT_CONTEXT_MARKERS)
+    return not has_government_context
 
 
 def _is_indirect_content_url(url: str) -> bool:

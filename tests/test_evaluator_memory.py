@@ -908,3 +908,57 @@ def test_quality_gate_keeps_document_entry_when_surface_url_exists() -> None:
     assert decision.useful is True
     assert decision.outcome == "data_on_site"
     assert "quality_gate:document_entry_without_surface_demoted" not in decision.notes
+
+
+def test_quality_gate_demotes_marketplace_noise_sources() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.9,
+        outcome="data_on_site",
+        reasoning=(
+            "Why useful: this freelance marketplace has gigs for data annotation and labeling. "
+            "Recurring path: monitor project listings and bids."
+        ),
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="page",
+                url="https://example-marketplace.com/browse/data-annotation-gigs",
+                summary="Freelancer gigs and client projects for annotation.",
+            )
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(decision=decision, candidate_domain="example-marketplace.com")
+
+    assert decision.useful is False
+    assert decision.outcome == "irrelevant"
+    assert "quality_gate:marketplace_noise_demoted" in decision.notes
+
+
+def test_quality_gate_keeps_government_marketplace_context() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.9,
+        outcome="data_on_site",
+        reasoning=(
+            "Why useful: Government procurement marketplace with official tender listings. "
+            "Recurring path: search tenders and filter open bids."
+        ),
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="page",
+                url="https://gem.gov.in/",
+                summary="Government e Marketplace with public procurement tenders.",
+            )
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(decision=decision, candidate_domain="gem.gov.in")
+
+    assert decision.useful is True
+    assert decision.outcome == "data_on_site"
+    assert "quality_gate:marketplace_noise_demoted" not in decision.notes
