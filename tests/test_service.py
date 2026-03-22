@@ -259,6 +259,15 @@ def test_dedupe_results_filters_known_noise_hosts() -> None:
         SearchResult(
             query_id="query_1",
             strategy_id="strategy_1",
+            rank=1,
+            serp_page=1,
+            title="Google search result page",
+            snippet="Search results",
+            url="https://www.google.com/search?q=data+annotation+rfp",
+        ),
+        SearchResult(
+            query_id="query_1",
+            strategy_id="strategy_1",
             rank=2,
             serp_page=1,
             title="Contract opportunities",

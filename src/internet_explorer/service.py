@@ -96,6 +96,10 @@ _NOISE_HOSTS = {
     "readthedocs.io",
     "substack.com",
     "pinterest.com",
+    "google.com",
+    "bing.com",
+    "duckduckgo.com",
+    "yahoo.com",
 }
 
 
