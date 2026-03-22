@@ -121,7 +121,7 @@ class AppConfig(BaseModel):
     discovery_cache_dir: Path = Path("data/discovery_cache")
     discovery_cache_key: str = ""
     max_browser_concurrency: int = 0
-    browser_delegate_timeout_seconds: int = 120
+    browser_delegate_timeout_seconds: int = 240
     browser_delegate_max_steps: int = 8
     max_url_concurrency: int = 0
     url_batch_size: int = 40
@@ -328,7 +328,7 @@ class AppConfig(BaseModel):
             discovery_cache_dir=Path(env_value("DISCOVERY_CACHE_DIR", str(root_dir / "data/discovery_cache"))),
             discovery_cache_key=env_value("DISCOVERY_CACHE_KEY"),
             max_browser_concurrency=int(env_value("MAX_BROWSER_CONCURRENCY", "0")),
-            browser_delegate_timeout_seconds=int(env_value("BROWSER_DELEGATE_TIMEOUT_SECONDS", "120")),
+            browser_delegate_timeout_seconds=int(env_value("BROWSER_DELEGATE_TIMEOUT_SECONDS", "240")),
             browser_delegate_max_steps=int(env_value("BROWSER_DELEGATE_MAX_STEPS", "8")),
             max_url_concurrency=int(env_value("MAX_URL_CONCURRENCY", "0")),
             url_batch_size=int(env_value("URL_BATCH_SIZE", "40")),
