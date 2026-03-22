@@ -288,6 +288,30 @@ class UrlEvaluator:
                     )
                     continue
 
+                if plan.action == "delegate_browser" and not self._should_delegate_browser(
+                    page_evidence=page_evidence,
+                    render_profile=render_profile,
+                    step_no=step_no,
+                ):
+                    fallback_url = self._resolve_target_url(
+                        target_url=plan.target_url,
+                        candidate=candidate,
+                        initial_links=initial_links,
+                        visited_urls=visited_urls,
+                        graph=graph,
+                        allow_visited=False,
+                    )
+                    if not fallback_url and candidate.start_url not in visited_urls:
+                        fallback_url = candidate.start_url
+                    plan = _NavigationPlanEnvelope(
+                        reasoning=(
+                            "Browser delegation skipped by guardrail; collecting more direct HTTP evidence first."
+                        ),
+                        action="fetch_url" if fallback_url else "stop",
+                        target_url=fallback_url,
+                        action_notes=["delegate_guardrail_fetch_first"],
+                    )
+
                 if plan.action == "delegate_browser":
                     delegate_url = self._resolve_target_url(
                         target_url=plan.target_url,
@@ -840,6 +864,27 @@ class UrlEvaluator:
             action="stop",
             target_url="",
         )
+
+    def _should_delegate_browser(
+        self,
+        *,
+        page_evidence: list[PageEvidence],
+        render_profile: str,
+        step_no: int,
+    ) -> bool:
+        if not self.config.enable_browser_delegation:
+            return False
+        if not page_evidence:
+            return False
+
+        latest = page_evidence[-1]
+        if latest.captcha_present or latest.paywall_present or latest.auth_required:
+            return True
+        if latest.contact_sales_present and render_profile in {"likely_csr", "hybrid"}:
+            return True
+        if render_profile in {"likely_csr", "hybrid"} and step_no >= 2:
+            return True
+        return False
 
     def _resolve_target_url(
         self,
