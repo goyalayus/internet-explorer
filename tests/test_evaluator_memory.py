@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 
 from internet_explorer.config import AppConfig
-from internet_explorer.evaluator import UrlEvaluator
-from internet_explorer.models import FetchResult, UrlCandidate
+from internet_explorer.evaluator import UrlEvaluator, _apply_quality_gates, _classify_scraping_path_quality
+from internet_explorer.models import EvaluationDecision, FetchResult, SourceEvidenceItem, UrlCandidate
 from internet_explorer.tool_inventory import ToolInventory
 
 
@@ -484,3 +484,67 @@ async def test_evaluator_uses_decision_fallback_when_llm_decision_fails(tmp_path
     assert evaluation.outcome == "data_on_site"
     assert any(note.startswith("decision_fallback:") for note in evaluation.notes)
     assert all(not note.startswith("evaluation_error:") for note in evaluation.notes)
+
+
+def test_scraping_path_quality_classifier() -> None:
+    good = _classify_scraping_path_quality(
+        "Why useful: official procurement portal. Recurring path: navigate to bids section, filter by keyword, and monitor current tenders."
+    )
+    partial = _classify_scraping_path_quality(
+        "Recurring path: use the procurement portal tenders feed for relevant notices."
+    )
+    weak = _classify_scraping_path_quality(
+        "This is relevant and has useful information."
+    )
+
+    assert good == "good"
+    assert partial == "partial"
+    assert weak == "weak"
+
+
+def test_quality_gate_clamps_weak_path_score() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.91,
+        outcome="data_on_site",
+        reasoning="RFP notices are visible on the page.",
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="page",
+                url="https://example.com/rfp",
+                summary="RFP listing snippet",
+            )
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(decision=decision)
+
+    assert decision.useful is True
+    assert decision.relevance_score <= 0.69
+    assert "quality_gate:weak_scraping_path_score_clamped" in decision.notes
+
+
+def test_quality_gate_demotes_weak_meta_path() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.9,
+        outcome="data_on_site",
+        reasoning="This curated directory links to many procurement sources.",
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="page",
+                url="https://example.com/list",
+                summary="Directory of procurement sources",
+            )
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(decision=decision)
+
+    assert decision.useful is False
+    assert decision.outcome == "irrelevant"
+    assert "quality_gate:weak_scraping_path_meta_demoted" in decision.notes

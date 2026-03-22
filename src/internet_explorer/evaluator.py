@@ -130,6 +130,55 @@ GENERIC_TOOL_IDENTITY_TERMS = {
     "contact",
     "pricing",
 }
+SCRAPING_PATH_ACTION_MARKERS = (
+    "search",
+    "filter",
+    "query",
+    "navigate",
+    "go to",
+    "use the",
+    "open the",
+    "track",
+    "monitor",
+)
+SCRAPING_PATH_SURFACE_MARKERS = (
+    "contract opportunities",
+    "procurement opportunities",
+    "solicitation",
+    "solicitations",
+    "tender",
+    "tenders",
+    "bids",
+    "supplier portal",
+    "vendor portal",
+    "procurement portal",
+    "api",
+    "endpoint",
+    "developer portal",
+    "docs",
+)
+SCRAPING_PATH_CONCRETE_MARKERS = (
+    "keyword",
+    "section",
+    "page",
+    "tab",
+    "query parameter",
+    "search field",
+    "filter by",
+    "ongoing",
+    "current",
+    "open",
+)
+META_RESOURCE_MARKERS = (
+    "curated directory",
+    "meta-resource",
+    "repository",
+    "support article",
+    "guide for finding",
+    "list of sources",
+    "academic paper",
+    "social media post",
+)
 
 
 class UrlEvaluator:
@@ -498,6 +547,8 @@ class UrlEvaluator:
                     "Skip it for novelty-focused discovery unless a human explicitly wants redundancy."
                 )
 
+            _apply_quality_gates(decision=decision)
+
             evaluation = UrlEvaluation(
                 url_id=candidate.url_id,
                 canonical_url=candidate.canonical_url,
@@ -836,7 +887,12 @@ class UrlEvaluator:
                     "- `paywall` when payment/upgrade is required for access.\n"
                     "- `irrelevant` when it does not materially help the intent.\n"
                     "- Novelty matters, but a non-novel source can still be useful.\n"
-                    "- `reasoning` must explain both why the source is correct and the rough recurring access path on this domain.\n"
+                    "- `reasoning` must explain both why the source is correct and the recurring access path.\n"
+                    "- Write `reasoning` as two labeled parts in one paragraph:\n"
+                    "  Why useful: <evidence-based justification>. Recurring path: <concrete path with where to go + what to do>.\n"
+                    "- For recurring path, include at least one concrete surface name (example: bids, tenders, contract opportunities, API docs)\n"
+                    "  and at least one concrete action (example: search/filter/query with keywords).\n"
+                    "- Do not mark social posts, meta directories, or academic references as useful unless they directly provide recurring extraction access.\n"
                     "- Return JSON with EXACT keys:\n"
                     "  useful (boolean), relevance_score (0..1 float), outcome,\n"
                     "  reasoning, api_stage, source_evidence (list), notes (list).\n"
@@ -1256,6 +1312,60 @@ def _reconcile_unknown_useful_outcome(
 
     notes.append("unknown_useful_outcome_demoted")
     return "unknown", False
+
+
+def _apply_quality_gates(*, decision: EvaluationDecision) -> None:
+    path_quality = _classify_scraping_path_quality(decision.reasoning)
+    decision.notes.append(f"path_quality:{path_quality}")
+    has_meta_hint = _has_meta_resource_hint(decision.reasoning)
+
+    if decision.useful and not decision.source_evidence and decision.outcome in {"data_on_site", "api_available"}:
+        decision.useful = False
+        decision.outcome = "irrelevant"
+        decision.relevance_score = min(decision.relevance_score, 0.3)
+        decision.notes.append("quality_gate:missing_source_evidence_demoted")
+        return
+
+    if decision.useful and any(note.startswith("decision_fallback:") for note in decision.notes):
+        decision.relevance_score = min(decision.relevance_score, 0.45)
+        decision.notes.append("quality_gate:decision_fallback_score_clamped")
+
+    if decision.useful and decision.outcome in {"data_on_site", "api_available"}:
+        if path_quality == "weak":
+            if has_meta_hint:
+                decision.useful = False
+                decision.outcome = "irrelevant"
+                decision.relevance_score = min(decision.relevance_score, 0.35)
+                decision.notes.append("quality_gate:weak_scraping_path_meta_demoted")
+                return
+            decision.relevance_score = min(decision.relevance_score, 0.69)
+            decision.notes.append("quality_gate:weak_scraping_path_score_clamped")
+            return
+        if path_quality == "partial" and decision.relevance_score >= 0.8:
+            decision.relevance_score = 0.79
+            decision.notes.append("quality_gate:partial_scraping_path_score_clamped")
+
+
+def _classify_scraping_path_quality(reasoning: str) -> str:
+    text = (reasoning or "").strip().lower()
+    if not text:
+        return "weak"
+
+    has_action = any(marker in text for marker in SCRAPING_PATH_ACTION_MARKERS)
+    has_surface = any(marker in text for marker in SCRAPING_PATH_SURFACE_MARKERS)
+    has_concrete = any(marker in text for marker in SCRAPING_PATH_CONCRETE_MARKERS)
+    has_meta_hint = _has_meta_resource_hint(text)
+
+    if has_action and has_surface and has_concrete and not has_meta_hint:
+        return "good"
+    if has_action and has_surface and not has_meta_hint:
+        return "partial"
+    return "weak"
+
+
+def _has_meta_resource_hint(reasoning: str) -> bool:
+    text = (reasoning or "").lower()
+    return any(marker in text for marker in META_RESOURCE_MARKERS)
 
 
 def _infer_outcome_from_source_evidence(*, api_stage: str, source_evidence: list[SourceEvidenceItem]) -> str:
