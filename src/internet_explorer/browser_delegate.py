@@ -511,7 +511,13 @@ class BrowserDelegationManager:
         native_result: dict[str, Any],
     ) -> BrowserDelegateResult:
         parsed = _extract_json_dict(native_result.get("final_result"))
-        classification = str((parsed or {}).get("classification", "unknown")).strip()
+        if parsed is None:
+            parsed = _extract_json_from_text_list(native_result.get("extracted_content", []))
+
+        fallback_text = _extract_delegate_text_fallback(native_result)
+        fallback_inferred = _infer_non_json_delegate_fields(fallback_text)
+
+        classification = str((parsed or {}).get("classification", fallback_inferred.get("classification", "unknown"))).strip()
         classification = CLASSIFICATION_ALIASES.get(classification.lower(), classification)
         if classification not in VALID_OUTCOMES:
             classification = "unknown"
@@ -522,6 +528,8 @@ class BrowserDelegationManager:
         if not relevant_links:
             relevant_links = urls[:20]
         evidence_snippets = _coerce_string_list((parsed or {}).get("evidence_snippets")) or extracted[:10]
+        if not evidence_snippets and fallback_text:
+            evidence_snippets = [fallback_text[:800]]
         confidence = _coerce_confidence((parsed or {}).get("confidence"), succeeded=bool(native_result.get("is_successful")))
 
         source_evidence = _coerce_source_evidence((parsed or {}).get("source_evidence"))
@@ -529,19 +537,30 @@ class BrowserDelegationManager:
             for snippet in evidence_snippets[:3]:
                 source_evidence.append(SourceEvidenceItem(kind="browser_finding", url=start_url, summary=snippet[:800]))
 
+        useful = _coerce_bool((parsed or {}).get("useful"))
+        if useful is None:
+            useful = bool(fallback_inferred.get("useful", False))
+        reasoning = str((parsed or {}).get("reasoning", "")).strip()
+        if not reasoning:
+            reasoning = fallback_text
+
         return BrowserDelegateResult(
             session_name=session_name,
             classification=classification,
-            useful=bool((parsed or {}).get("useful", False)),
-            reasoning=str((parsed or {}).get("reasoning", "")).strip(),
+            useful=bool(useful),
+            reasoning=reasoning,
             render_path=_normalize_render_path((parsed or {}).get("render_path")),
-            data_on_site=bool((parsed or {}).get("data_on_site", False)),
-            api_detected=bool((parsed or {}).get("api_detected", False)),
-            api_accessible_guess=bool((parsed or {}).get("api_accessible_guess", False)),
-            contact_sales_only=bool((parsed or {}).get("contact_sales_only", False)),
-            paywall_present=bool((parsed or {}).get("paywall_present", False)),
-            auth_required=bool((parsed or {}).get("auth_required", False)),
-            captcha_present=bool((parsed or {}).get("captcha_present", False)),
+            data_on_site=bool((parsed or {}).get("data_on_site", fallback_inferred.get("data_on_site", False))),
+            api_detected=bool((parsed or {}).get("api_detected", fallback_inferred.get("api_detected", False))),
+            api_accessible_guess=bool(
+                (parsed or {}).get("api_accessible_guess", fallback_inferred.get("api_accessible_guess", False))
+            ),
+            contact_sales_only=bool(
+                (parsed or {}).get("contact_sales_only", fallback_inferred.get("contact_sales_only", False))
+            ),
+            paywall_present=bool((parsed or {}).get("paywall_present", fallback_inferred.get("paywall_present", False))),
+            auth_required=bool((parsed or {}).get("auth_required", fallback_inferred.get("auth_required", False))),
+            captcha_present=bool((parsed or {}).get("captcha_present", fallback_inferred.get("captcha_present", False))),
             relevant_links=relevant_links,
             evidence_snippets=evidence_snippets,
             source_evidence=source_evidence,
@@ -613,6 +632,129 @@ def _extract_json_dict(raw: Any) -> dict[str, Any] | None:
         return None
 
 
+def _extract_json_from_text_list(values: list[str]) -> dict[str, Any] | None:
+    if not isinstance(values, list):
+        return None
+    for value in values:
+        parsed = _extract_json_dict(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _extract_delegate_text_fallback(native_result: dict[str, Any]) -> str:
+    final_result = native_result.get("final_result")
+    if isinstance(final_result, str):
+        text = final_result.strip()
+        if text:
+            return text
+    extracted = native_result.get("extracted_content")
+    if isinstance(extracted, list):
+        for item in extracted:
+            text = str(item).strip()
+            if text:
+                return text
+    errors = native_result.get("errors")
+    if isinstance(errors, list):
+        for item in errors:
+            text = str(item).strip()
+            if text:
+                return text
+    return ""
+
+
+def _infer_non_json_delegate_fields(text: str) -> dict[str, bool | str]:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return {
+            "classification": "unknown",
+            "useful": False,
+            "data_on_site": False,
+            "api_detected": False,
+            "api_accessible_guess": False,
+            "contact_sales_only": False,
+            "paywall_present": False,
+            "auth_required": False,
+            "captcha_present": False,
+        }
+
+    has_captcha = any(marker in lowered for marker in ("captcha", "cloudflare", "verify you are human"))
+    has_paywall = any(marker in lowered for marker in ("paywall", "subscription", "upgrade required", "payment required"))
+    has_contact_sales = any(marker in lowered for marker in ("contact sales", "talk to sales", "book a demo", "schedule demo"))
+    has_auth_required = any(marker in lowered for marker in ("login required", "sign in", "authentication required", "auth required"))
+    has_api_signal = "api" in lowered and any(
+        marker in lowered for marker in ("endpoint", "openapi", "swagger", "developer", "documentation")
+    )
+    has_procurement_signal = any(
+        marker in lowered for marker in ("rfp", "tender", "procurement", "bid", "solicitation", "opportunities")
+    )
+    has_negative_signal = any(
+        marker in lowered
+        for marker in (
+            "unable to",
+            "could not",
+            "cannot",
+            "failed",
+            "not found",
+            "no relevant",
+            "inaccessible",
+            "blocked",
+            "403",
+            "404",
+        )
+    )
+
+    classification = "unknown"
+    useful = False
+    data_on_site = False
+    api_detected = False
+    api_accessible_guess = False
+    contact_sales_only = False
+    paywall_present = False
+    auth_required = False
+    captcha_present = False
+
+    if has_captcha:
+        captcha_present = True
+        classification = "unknown"
+    elif has_paywall:
+        paywall_present = True
+        classification = "paywall"
+        useful = True
+    elif has_contact_sales:
+        contact_sales_only = True
+        classification = "contact_sales_only"
+        useful = True
+    elif has_api_signal and not has_negative_signal:
+        api_detected = True
+        api_accessible_guess = not any(marker in lowered for marker in ("auth", "login", "key required", "token required"))
+        classification = "api_available"
+        useful = True
+    elif has_procurement_signal and not has_negative_signal:
+        data_on_site = True
+        classification = "data_on_site"
+        useful = True
+    elif has_negative_signal:
+        classification = "irrelevant"
+    else:
+        classification = "unknown"
+
+    if has_auth_required:
+        auth_required = True
+
+    return {
+        "classification": classification,
+        "useful": useful,
+        "data_on_site": data_on_site,
+        "api_detected": api_detected,
+        "api_accessible_guess": api_accessible_guess,
+        "contact_sales_only": contact_sales_only,
+        "paywall_present": paywall_present,
+        "auth_required": auth_required,
+        "captcha_present": captcha_present,
+    }
+
+
 def _history_to_recipe(action_history: Any) -> list[BrowserStep]:
     if not isinstance(action_history, list):
         return []
@@ -665,6 +807,19 @@ def _coerce_confidence(value: Any, *, succeeded: bool) -> float:
         if lowered in {"low", "very low"}:
             return 0.3 if succeeded else 0.1
         return 0.8 if succeeded else 0.4
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    lowered = str(value).strip().lower()
+    if lowered in {"true", "1", "yes", "y"}:
+        return True
+    if lowered in {"false", "0", "no", "n"}:
+        return False
+    return None
 
 
 def _coerce_source_evidence(value: Any) -> list[SourceEvidenceItem]:

@@ -162,6 +162,37 @@ class _BrowserUseAgentAliasShape:
         return _HistoryAliasShape()
 
 
+class _HistoryPlainTextCaptcha:
+    def final_result(self):
+        return (
+            "The procurement page is blocked by a Cloudflare CAPTCHA challenge. "
+            "I cannot proceed further in this environment."
+        )
+
+    def is_successful(self):
+        return False
+
+    def action_history(self):
+        return []
+
+    def urls(self):
+        return ["https://example.com/start"]
+
+    def errors(self):
+        return []
+
+    def extracted_content(self):
+        return ["🔗 Navigated to https://example.com/start"]
+
+
+class _BrowserUseAgentPlainTextCaptcha:
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    async def run(self, max_steps: int):
+        return _HistoryPlainTextCaptcha()
+
+
 class _BrowserUseAgentTimeout:
     def __init__(self, **kwargs) -> None:
         self.kwargs = kwargs
@@ -380,6 +411,38 @@ def test_browser_delegate_normalizes_browser_output_shapes(monkeypatch, tmp_path
     assert result.source_evidence[0].kind == "page"
     assert result.source_evidence[0].url == "https://example.com/about"
     assert result.confidence == 0.9
+
+
+def test_browser_delegate_uses_plain_text_fallback_signals(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    monkeypatch.setattr(
+        "internet_explorer.browser_delegate.load_eu_swarm_modules",
+        lambda config: {
+            "AzureOpenAIProvider": _AzureOpenAIProvider,
+            "create_agent": lambda **kwargs: _PlannerAgent({}),
+            "SmartScraperPlan": _SmartScraperPlan,
+            "BrowserUseAgent": _BrowserUseAgentPlainTextCaptcha,
+            "BrowserUseBrowser": _Browser,
+            "get_browser_use_llm_by_name": lambda name: object(),
+        },
+    )
+
+    manager = BrowserDelegationManager(config, _TelemetryStub(), lambda update: None)
+    result = manager._run_delegate_sync(
+        "session_plain_text",
+        "https://example.com/start",
+        "find procurement api docs",
+        "url_plain",
+        [],
+    )
+
+    assert result.classification == "unknown"
+    assert result.useful is False
+    assert result.captcha_present is True
+    assert "captcha" in result.reasoning.lower()
+    assert result.source_evidence
+    assert result.source_evidence[0].kind == "browser_finding"
 
 
 def test_browser_delegate_returns_fallback_on_timeout(monkeypatch, tmp_path: Path) -> None:
