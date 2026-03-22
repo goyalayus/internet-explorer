@@ -188,7 +188,15 @@ class IntentDiscoveryService:
             summary.error = "run_cancelled"
             summary.finished_at = datetime.utcnow()
             summary.completed_at = summary.finished_at
-            self.persistence.update_run(run_id, summary.model_dump())
+            self.persistence.update_run(
+                run_id,
+                {
+                    "status": summary.status,
+                    "error": summary.error,
+                    "finished_at": summary.finished_at,
+                    "completed_at": summary.completed_at,
+                },
+            )
             telemetry.emit(
                 phase="run_cancelled",
                 actor="system",
@@ -202,7 +210,15 @@ class IntentDiscoveryService:
             summary.error = str(exc)
             summary.finished_at = datetime.utcnow()
             summary.completed_at = summary.finished_at
-            self.persistence.update_run(run_id, summary.model_dump())
+            self.persistence.update_run(
+                run_id,
+                {
+                    "status": summary.status,
+                    "error": summary.error,
+                    "finished_at": summary.finished_at,
+                    "completed_at": summary.completed_at,
+                },
+            )
             telemetry.emit(
                 phase="run_failed",
                 actor="system",

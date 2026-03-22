@@ -146,6 +146,37 @@ def _collect_metrics(config: AppConfig, run_id: str) -> QualityMetrics:
     )
 
 
+def _latest_run_id_since(config: AppConfig, started_at_utc: datetime) -> str:
+    persistence = MongoPersistence(config)
+    try:
+        row = (
+            persistence.runs.find(
+                {"started_at": {"$gte": started_at_utc}},
+                {"_id": 0, "run_id": 1},
+            )
+            .sort("started_at", -1)
+            .limit(1)
+        )
+        docs = list(row)
+    finally:
+        persistence.close()
+    if not docs:
+        return ""
+    return str(docs[0].get("run_id") or "")
+
+
+def _run_status(config: AppConfig, run_id: str) -> dict[str, Any]:
+    persistence = MongoPersistence(config)
+    try:
+        doc = persistence.runs.find_one(
+            {"run_id": run_id},
+            {"_id": 0, "status": 1, "error": 1, "evaluated_url_count": 1, "useful_url_count": 1},
+        )
+    finally:
+        persistence.close()
+    return doc or {}
+
+
 def _is_better(current: QualityMetrics, best: QualityMetrics | None) -> bool:
     if best is None:
         return True
@@ -220,13 +251,38 @@ def main() -> None:
     run_rows: list[dict[str, Any]] = []
 
     for iteration in range(1, max(1, args.max_runs) + 1):
-        run_id = asyncio.run(_run_once(args.intent))
         config = AppConfig.from_env(Path.cwd(), prefer_process_env=True)
+        iteration_started = datetime.utcnow()
+        run_id = ""
+        run_exception = ""
+        try:
+            run_id = asyncio.run(_run_once(args.intent))
+        except BaseException as exc:  # noqa: BLE001
+            run_exception = f"{type(exc).__name__}: {exc}"
+            _append_line(status_log_path, f"[{_utc_now()}] iteration={iteration} run raised {run_exception}")
+            run_id = _latest_run_id_since(config, iteration_started)
+            if not run_id:
+                plateau_count += 1
+                _append_line(
+                    status_log_path,
+                    (
+                        f"[{_utc_now()}] iteration={iteration} no run_id recovered; "
+                        f"plateau_count={plateau_count}/{args.plateau_patience}"
+                    ),
+                )
+                if plateau_count >= max(1, args.plateau_patience):
+                    _append_line(status_log_path, f"[{_utc_now()}] plateau reached after run failures, stopping loop")
+                    break
+                continue
+
         metrics = _collect_metrics(config, run_id)
+        run_state = _run_status(config, run_id)
 
         row = {
             "iteration": iteration,
             "run_id": metrics.run_id,
+            "run_status": run_state.get("status"),
+            "run_error": run_state.get("error") or run_exception,
             "evaluated_count": metrics.evaluated_count,
             "useful_count": metrics.useful_count,
             "strong_count": metrics.strong_count,

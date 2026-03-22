@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import traceback
 from typing import Any
 
@@ -588,6 +589,42 @@ class UrlEvaluator:
                 output_summary=evaluation.model_dump(mode="json"),
                 decision=evaluation.outcome,
                 latency_ms=self.telemetry.elapsed_ms(started),
+            )
+            return evaluation
+        except asyncio.CancelledError as exc:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise
+
+            traceback_text = traceback.format_exc(limit=8)
+            evaluation = UrlEvaluation(
+                url_id=candidate.url_id,
+                canonical_url=candidate.canonical_url,
+                start_url=candidate.start_url,
+                homepage_url=candidate.homepage_url,
+                domain=candidate.domain,
+                novelty=candidate.novelty,
+                render_profile="hybrid",
+                outcome="unknown",
+                useful=False,
+                reasoning="Evaluation cancelled while processing this source; treating as unknown instead of aborting the run.",
+                notes=[
+                    "evaluation_error:CancelledError",
+                    _describe_exception(exc),
+                    f"traceback:{traceback_text[:1400]}",
+                ],
+            )
+            self.telemetry.emit(
+                phase="final_decision",
+                actor="system",
+                strategy_id=candidate.strategy_id,
+                query_id=candidate.query_id,
+                url_id=candidate.url_id,
+                input_payload={"candidate": candidate.model_dump()},
+                output_summary=evaluation.model_dump(mode="json"),
+                decision="error_fallback",
+                latency_ms=self.telemetry.elapsed_ms(started),
+                error_code="CancelledError",
             )
             return evaluation
         except Exception as exc:

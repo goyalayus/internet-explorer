@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -484,6 +485,29 @@ async def test_evaluator_uses_decision_fallback_when_llm_decision_fails(tmp_path
     assert evaluation.outcome == "data_on_site"
     assert any(note.startswith("decision_fallback:") for note in evaluation.notes)
     assert all(not note.startswith("evaluation_error:") for note in evaluation.notes)
+
+
+@pytest.mark.asyncio
+async def test_evaluator_converts_internal_cancelled_error_to_unknown(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    evaluator = UrlEvaluator(
+        config,
+        _LLMStub(
+            tool_terms=["newsource"],
+            decision_error=asyncio.CancelledError("agent task cancelled"),
+        ),
+        _FetcherStub(_responses()),
+        _TelemetryStub(),
+        _BrowserManagerStub(),
+        tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
+    )
+    candidate = _candidate("url_cancel")
+
+    evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
+
+    assert evaluation.useful is False
+    assert evaluation.outcome == "unknown"
+    assert "evaluation_error:CancelledError" in evaluation.notes
 
 
 def test_scraping_path_quality_classifier() -> None:
