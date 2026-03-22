@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from internet_explorer.canonicalize import registrable_domain
 from internet_explorer.config import AppConfig
 from internet_explorer.models import BrowserDelegateResult, BrowserStep, SourceEvidenceItem
 from internet_explorer.pdf_verify import PdfVerifierService, pdf_verification_tool_payload
@@ -41,6 +42,12 @@ TRANSIENT_DELEGATE_ERROR_MARKERS = (
     "browserstartevent",
 )
 MAX_TRANSIENT_DELEGATE_RETRIES = 1
+EXTERNAL_SEARCH_DOMAINS = {
+    "google.com",
+    "duckduckgo.com",
+    "bing.com",
+    "yahoo.com",
+}
 
 
 class _VerifyPdfUrlInput(BaseModel):
@@ -534,8 +541,7 @@ class BrowserDelegationManager:
 
         source_evidence = _coerce_source_evidence((parsed or {}).get("source_evidence"))
         if not source_evidence:
-            for snippet in evidence_snippets[:3]:
-                source_evidence.append(SourceEvidenceItem(kind="browser_finding", url=start_url, summary=snippet[:800]))
+            source_evidence.extend(_fallback_source_evidence(urls=urls, evidence_snippets=evidence_snippets, start_url=start_url))
 
         useful = _coerce_bool((parsed or {}).get("useful"))
         if useful is None:
@@ -543,6 +549,18 @@ class BrowserDelegationManager:
         reasoning = str((parsed or {}).get("reasoning", "")).strip()
         if not reasoning:
             reasoning = fallback_text
+
+        domain_guard = _build_domain_guard(
+            start_url=start_url,
+            visited_urls=urls,
+            classification=classification,
+        )
+        if domain_guard.get("demote"):
+            classification = "unknown"
+            useful = False
+            confidence = min(confidence, 0.25)
+            reasoning = _prepend_reasoning(reasoning, str(domain_guard.get("reason") or "Delegation drifted off-domain."))
+            evidence_snippets.insert(0, str(domain_guard.get("reason") or "off-domain delegation"))
 
         return BrowserDelegateResult(
             session_name=session_name,
@@ -572,6 +590,7 @@ class BrowserDelegationManager:
                 "plan": plan,
                 "native": native_result,
                 "parsed_final_result": parsed,
+                "domain_guard": domain_guard,
             },
         )
 
@@ -661,6 +680,88 @@ def _extract_delegate_text_fallback(native_result: dict[str, Any]) -> str:
             if text:
                 return text
     return ""
+
+
+def _fallback_source_evidence(*, urls: list[str], evidence_snippets: list[str], start_url: str) -> list[SourceEvidenceItem]:
+    evidence: list[SourceEvidenceItem] = []
+    seeded_urls = [url for url in urls if _is_http_url(url)]
+    if not seeded_urls:
+        seeded_urls = [start_url] if _is_http_url(start_url) else []
+
+    if seeded_urls:
+        for index, seeded_url in enumerate(seeded_urls[:3]):
+            summary = evidence_snippets[index][:800] if index < len(evidence_snippets) else ""
+            evidence.append(SourceEvidenceItem(kind="browser_finding", url=seeded_url, summary=summary))
+        return evidence
+
+    for snippet in evidence_snippets[:3]:
+        evidence.append(SourceEvidenceItem(kind="browser_finding", url="", summary=snippet[:800]))
+    return evidence
+
+
+def _build_domain_guard(*, start_url: str, visited_urls: list[str], classification: str) -> dict[str, Any]:
+    start_domain = registrable_domain(start_url)
+    cleaned_urls = [url for url in visited_urls if _is_http_url(url)]
+    if not start_domain or not cleaned_urls:
+        return {"demote": False, "reason": "", "start_domain": start_domain}
+
+    on_domain_urls = [url for url in cleaned_urls if registrable_domain(url) == start_domain]
+    off_domain_urls = [url for url in cleaned_urls if registrable_domain(url) and registrable_domain(url) != start_domain]
+
+    if off_domain_urls and not on_domain_urls:
+        return {
+            "demote": True,
+            "reason": (
+                f"Browser delegation left the source domain ({start_domain}) and did not collect on-domain evidence."
+            ),
+            "start_domain": start_domain,
+            "off_domain_urls": off_domain_urls[:8],
+            "on_domain_urls": [],
+        }
+
+    if classification in {"data_on_site", "api_available"} and _contains_external_search_url(off_domain_urls):
+        return {
+            "demote": True,
+            "reason": "Browser delegation drifted into external search pages, so this result is not trusted.",
+            "start_domain": start_domain,
+            "off_domain_urls": off_domain_urls[:8],
+            "on_domain_urls": on_domain_urls[:8],
+        }
+
+    return {
+        "demote": False,
+        "reason": "",
+        "start_domain": start_domain,
+        "off_domain_urls": off_domain_urls[:8],
+        "on_domain_urls": on_domain_urls[:8],
+    }
+
+
+def _contains_external_search_url(urls: list[str]) -> bool:
+    for url in urls:
+        domain = registrable_domain(url)
+        if not domain:
+            continue
+        if any(domain == marker or domain.endswith(f".{marker}") for marker in EXTERNAL_SEARCH_DOMAINS):
+            return True
+    return False
+
+
+def _is_http_url(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    return text.startswith("http://") or text.startswith("https://")
+
+
+def _prepend_reasoning(reasoning: str, prefix: str) -> str:
+    base = (reasoning or "").strip()
+    head = (prefix or "").strip()
+    if not head:
+        return base
+    if not base:
+        return head
+    if base.lower().startswith(head.lower()):
+        return base
+    return f"{head} {base}"
 
 
 def _infer_non_json_delegate_fields(text: str) -> dict[str, bool | str]:

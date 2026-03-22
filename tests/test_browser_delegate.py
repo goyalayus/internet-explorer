@@ -201,6 +201,68 @@ class _BrowserUseAgentTimeout:
         raise asyncio.TimeoutError()
 
 
+class _HistoryOffDomainUseful:
+    def final_result(self):
+        return (
+            '{"classification":"data_on_site","useful":true,'
+            '"reasoning":"RFP signals found during navigation.","confidence":0.88}'
+        )
+
+    def is_successful(self):
+        return True
+
+    def action_history(self):
+        return [[{"navigate": {"url": "https://amazon.com"}}]]
+
+    def urls(self):
+        return ["https://amazon.com/", "https://www.amazon.com/some/path"]
+
+    def errors(self):
+        return []
+
+    def extracted_content(self):
+        return ["navigated to amazon"]
+
+
+class _BrowserUseAgentOffDomainUseful:
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    async def run(self, max_steps: int):
+        return _HistoryOffDomainUseful()
+
+
+class _HistoryExternalSearchDrift:
+    def final_result(self):
+        return (
+            '{"classification":"data_on_site","useful":true,'
+            '"reasoning":"Found procurement opportunities.","confidence":0.91}'
+        )
+
+    def is_successful(self):
+        return True
+
+    def action_history(self):
+        return [[{"navigate": {"url": "https://example.com/start"}}, {"navigate": {"url": "https://google.com/search?q=rfp"}}]]
+
+    def urls(self):
+        return ["https://example.com/start", "https://google.com/search?q=rfp"]
+
+    def errors(self):
+        return []
+
+    def extracted_content(self):
+        return ["visited google search"]
+
+
+class _BrowserUseAgentExternalSearchDrift:
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    async def run(self, max_steps: int):
+        return _HistoryExternalSearchDrift()
+
+
 class _PlannerAgentLargeSteps(_PlannerAgent):
     def execute(self, task: str):
         self.captured["planning_task"] = task
@@ -474,6 +536,68 @@ def test_browser_delegate_returns_fallback_on_timeout(monkeypatch, tmp_path: Pat
     assert result.classification == "unknown"
     assert result.useful is False
     assert result.render_path == "browser_delegate_fallback"
+
+
+def test_browser_delegate_demotes_off_domain_only_navigation(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    monkeypatch.setattr(
+        "internet_explorer.browser_delegate.load_eu_swarm_modules",
+        lambda config: {
+            "AzureOpenAIProvider": _AzureOpenAIProvider,
+            "create_agent": lambda **kwargs: _PlannerAgent({}),
+            "SmartScraperPlan": _SmartScraperPlan,
+            "BrowserUseAgent": _BrowserUseAgentOffDomainUseful,
+            "BrowserUseBrowser": _Browser,
+            "get_browser_use_llm_by_name": lambda name: object(),
+        },
+    )
+
+    manager = BrowserDelegationManager(config, _TelemetryStub(), lambda update: None)
+    result = manager._run_delegate_sync(
+        "session_off_domain",
+        "https://example.com/start",
+        "find procurement data",
+        "url_off_domain",
+        [],
+    )
+
+    assert result.classification == "unknown"
+    assert result.useful is False
+    assert "left the source domain" in result.reasoning.lower()
+    assert result.source_evidence
+    assert "amazon.com" in (result.source_evidence[0].url or "")
+    assert result.raw_output["domain_guard"]["demote"] is True
+
+
+def test_browser_delegate_demotes_external_search_drift(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    monkeypatch.setattr(
+        "internet_explorer.browser_delegate.load_eu_swarm_modules",
+        lambda config: {
+            "AzureOpenAIProvider": _AzureOpenAIProvider,
+            "create_agent": lambda **kwargs: _PlannerAgent({}),
+            "SmartScraperPlan": _SmartScraperPlan,
+            "BrowserUseAgent": _BrowserUseAgentExternalSearchDrift,
+            "BrowserUseBrowser": _Browser,
+            "get_browser_use_llm_by_name": lambda name: object(),
+        },
+    )
+
+    manager = BrowserDelegationManager(config, _TelemetryStub(), lambda update: None)
+    result = manager._run_delegate_sync(
+        "session_search_drift",
+        "https://example.com/start",
+        "find procurement data",
+        "url_search_drift",
+        [],
+    )
+
+    assert result.classification == "unknown"
+    assert result.useful is False
+    assert "external search pages" in result.reasoning.lower()
+    assert result.raw_output["domain_guard"]["demote"] is True
 
 
 @pytest.mark.asyncio
