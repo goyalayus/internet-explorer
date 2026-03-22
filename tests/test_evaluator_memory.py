@@ -774,3 +774,77 @@ def test_quality_gate_keeps_indirect_candidate_when_surface_url_evidence_exists(
     assert decision.useful is True
     assert decision.outcome == "data_on_site"
     assert "quality_gate:indirect_page_without_surface_demoted" not in decision.notes
+
+
+def test_quality_gate_demotes_document_entry_without_surface_url() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.9,
+        outcome="data_on_site",
+        reasoning=(
+            "Why useful: this PDF references data labeling work. "
+            "Recurring path: monitor this source."
+        ),
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="pdf",
+                url="https://agency.gov/files/reports/weekly_report.pdf",
+                summary="Report mentioning data annotation in a contract context.",
+            ),
+            SourceEvidenceItem(
+                kind="page",
+                url="https://agency.gov/files/reports/weekly_report.pdf",
+                summary="Same report URL.",
+            ),
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(
+        decision=decision,
+        candidate_domain="agency.gov",
+        candidate_canonical_url="https://agency.gov/files/reports/weekly_report.pdf",
+        candidate_content_kind_hint="pdf",
+    )
+
+    assert decision.useful is False
+    assert decision.outcome == "irrelevant"
+    assert "quality_gate:document_entry_without_surface_demoted" in decision.notes
+
+
+def test_quality_gate_keeps_document_entry_when_surface_url_exists() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.9,
+        outcome="data_on_site",
+        reasoning=(
+            "Why useful: procurement source with clear extraction path. "
+            "Recurring path: open bid listing and filter tenders."
+        ),
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="pdf",
+                url="https://agency.gov/files/reports/weekly_report.pdf",
+                summary="Supporting document.",
+            ),
+            SourceEvidenceItem(
+                kind="page",
+                url="https://agency.gov/procurement/bids/open",
+                summary="Open bids listing page.",
+            ),
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(
+        decision=decision,
+        candidate_domain="agency.gov",
+        candidate_canonical_url="https://agency.gov/files/reports/weekly_report.pdf",
+        candidate_content_kind_hint="pdf",
+    )
+
+    assert decision.useful is True
+    assert decision.outcome == "data_on_site"
+    assert "quality_gate:document_entry_without_surface_demoted" not in decision.notes

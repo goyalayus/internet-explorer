@@ -637,6 +637,7 @@ class UrlEvaluator:
                 decision=decision,
                 candidate_domain=candidate.domain,
                 candidate_canonical_url=candidate.canonical_url,
+                candidate_content_kind_hint=candidate.content_kind_hint,
             )
 
             evaluation = UrlEvaluation(
@@ -1466,6 +1467,7 @@ def _apply_quality_gates(
     decision: EvaluationDecision,
     candidate_domain: str = "",
     candidate_canonical_url: str = "",
+    candidate_content_kind_hint: str = "unknown",
 ) -> None:
     path_quality = _classify_scraping_path_quality(decision.reasoning)
     decision.notes.append(f"path_quality:{path_quality}")
@@ -1506,6 +1508,18 @@ def _apply_quality_gates(
         decision.outcome = "irrelevant"
         decision.relevance_score = min(decision.relevance_score, 0.35)
         decision.notes.append("quality_gate:indirect_page_without_surface_demoted")
+        return
+
+    if (
+        decision.useful
+        and decision.outcome == "data_on_site"
+        and candidate_content_kind_hint in {"pdf", "binary_file"}
+        and not _has_non_indirect_procurement_surface_url(decision.source_evidence)
+    ):
+        decision.useful = False
+        decision.outcome = "irrelevant"
+        decision.relevance_score = min(decision.relevance_score, 0.35)
+        decision.notes.append("quality_gate:document_entry_without_surface_demoted")
         return
 
     if (
