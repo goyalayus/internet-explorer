@@ -481,9 +481,10 @@ async def test_evaluator_uses_decision_fallback_when_llm_decision_fails(tmp_path
 
     evaluation = await evaluator.evaluate(intent="find procurement data", candidate=candidate)
 
-    assert evaluation.useful is True
-    assert evaluation.outcome == "data_on_site"
+    assert evaluation.useful is False
+    assert evaluation.outcome == "irrelevant"
     assert any(note.startswith("decision_fallback:") for note in evaluation.notes)
+    assert "quality_gate:low_confidence_useful_demoted" in evaluation.notes
     assert all(not note.startswith("evaluation_error:") for note in evaluation.notes)
 
 
@@ -596,3 +597,27 @@ def test_quality_gate_demotes_document_only_evidence() -> None:
     assert decision.useful is False
     assert decision.outcome == "irrelevant"
     assert "quality_gate:document_only_evidence_demoted" in decision.notes
+
+
+def test_quality_gate_demotes_low_confidence_useful() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.7,
+        outcome="data_on_site",
+        reasoning="Why useful: related portal. Recurring path: search tenders by keyword in bids section.",
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="page",
+                url="https://example.com/bids",
+                summary="Bids listing",
+            )
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(decision=decision)
+
+    assert decision.useful is False
+    assert decision.outcome == "irrelevant"
+    assert "quality_gate:low_confidence_useful_demoted" in decision.notes

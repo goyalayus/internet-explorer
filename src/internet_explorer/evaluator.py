@@ -1380,6 +1380,13 @@ def _apply_quality_gates(*, decision: EvaluationDecision) -> None:
         decision.relevance_score = min(decision.relevance_score, 0.45)
         decision.notes.append("quality_gate:decision_fallback_score_clamped")
 
+    if decision.useful and decision.outcome in {"data_on_site", "api_available"} and decision.relevance_score < 0.75:
+        decision.useful = False
+        decision.outcome = "irrelevant"
+        decision.relevance_score = min(decision.relevance_score, 0.35)
+        decision.notes.append("quality_gate:low_confidence_useful_demoted")
+        return
+
     if decision.useful and decision.outcome in {"data_on_site", "api_available"}:
         if path_quality == "weak":
             if has_meta_hint:
