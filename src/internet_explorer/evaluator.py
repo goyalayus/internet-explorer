@@ -943,7 +943,13 @@ class UrlEvaluator:
         if latest.contact_sales_present and render_profile in {"likely_csr", "hybrid"}:
             return True
         if render_profile in {"likely_csr", "hybrid"} and step_no >= 2:
-            return True
+            text_len = len((latest.text_excerpt or "").strip())
+            has_navigation_links = bool(latest.relevant_links)
+            has_content_signals = bool(latest.data_signals) or latest.api_signal.detected
+            if text_len <= 120:
+                return True
+            if text_len <= 240 and not has_navigation_links and not has_content_signals:
+                return True
         return False
 
     def _resolve_target_url(

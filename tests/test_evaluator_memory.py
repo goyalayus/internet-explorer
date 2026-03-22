@@ -5,7 +5,7 @@ import pytest
 
 from internet_explorer.config import AppConfig
 from internet_explorer.evaluator import UrlEvaluator, _apply_quality_gates, _classify_scraping_path_quality
-from internet_explorer.models import EvaluationDecision, FetchResult, SourceEvidenceItem, UrlCandidate
+from internet_explorer.models import ApiSignal, EvaluationDecision, FetchResult, PageEvidence, SourceEvidenceItem, UrlCandidate
 from internet_explorer.tool_inventory import ToolInventory
 
 
@@ -440,6 +440,66 @@ async def test_evaluator_ignores_delegate_action_when_browser_disabled(tmp_path:
     assert evaluation.useful is True
     assert len(evaluation.visited_memory) == 1
     assert evaluation.visited_memory[0].url == "https://example.com/"
+
+
+def test_should_delegate_browser_only_when_hybrid_page_is_thin(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    evaluator = UrlEvaluator(
+        config,
+        _LLMStub(tool_terms=["newsource"]),
+        _FetcherStub(_responses()),
+        _TelemetryStub(),
+        _BrowserManagerStub(),
+        tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
+    )
+
+    rich_page = PageEvidence(
+        url="https://example.com/",
+        title="Procurement portal",
+        content_type="text/html",
+        text_excerpt=(
+            "Current tenders and procurement opportunities are listed here with filters, "
+            "pagination, category selectors, date ranges, and downloadable notices for suppliers. "
+            "Use the search controls to query active and archived bids by keyword and department."
+        ),
+        relevant_links=["https://example.com/rfp/current"],
+        api_signal=ApiSignal(detected=False),
+        data_signals=["tender", "rfp"],
+    )
+    thin_page = PageEvidence(
+        url="https://example.com/app",
+        title="App shell",
+        content_type="text/html",
+        text_excerpt="Enable JavaScript",
+        relevant_links=[],
+        api_signal=ApiSignal(detected=False),
+        data_signals=[],
+    )
+
+    assert evaluator._should_delegate_browser(page_evidence=[rich_page], render_profile="hybrid", step_no=2) is False
+    assert evaluator._should_delegate_browser(page_evidence=[thin_page], render_profile="hybrid", step_no=2) is True
+
+
+def test_should_delegate_browser_when_blocked_or_auth_gated(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    evaluator = UrlEvaluator(
+        config,
+        _LLMStub(tool_terms=["newsource"]),
+        _FetcherStub(_responses()),
+        _TelemetryStub(),
+        _BrowserManagerStub(),
+        tool_inventory=ToolInventory(["coresignal", "rapidapi", "builtwith"]),
+    )
+
+    blocked_page = PageEvidence(
+        url="https://example.com/",
+        title="Blocked",
+        content_type="text/html",
+        text_excerpt="Please verify you are human.",
+        captcha_present=True,
+    )
+
+    assert evaluator._should_delegate_browser(page_evidence=[blocked_page], render_profile="static_ssr", step_no=1) is True
 
 
 @pytest.mark.asyncio
