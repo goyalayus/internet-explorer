@@ -664,13 +664,13 @@ def test_quality_gate_demotes_low_confidence_useful() -> None:
         useful=True,
         relevance_score=0.7,
         outcome="data_on_site",
-        reasoning="Why useful: related portal. Recurring path: search tenders by keyword in bids section.",
+        reasoning="Why useful: related portal. Recurring path: monitor updates page.",
         api_stage="none",
         source_evidence=[
             SourceEvidenceItem(
                 kind="page",
-                url="https://example.com/bids",
-                summary="Bids listing",
+                url="https://example.com/updates",
+                summary="General updates listing",
             )
         ],
         notes=[],
@@ -681,6 +681,43 @@ def test_quality_gate_demotes_low_confidence_useful() -> None:
     assert decision.useful is False
     assert decision.outcome == "irrelevant"
     assert "quality_gate:low_confidence_useful_demoted" in decision.notes
+
+
+def test_quality_gate_promotes_low_confidence_with_strong_procurement_evidence() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.62,
+        outcome="data_on_site",
+        reasoning=(
+            "Why useful: official procurement source with recurring data annotation tenders. "
+            "Recurring path: open procurement bids section and search by keyword in the tender listing page."
+        ),
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="page",
+                url="https://agency.gov/procurement/bids/open",
+                summary="Open procurement bids and solicitations for data annotation services.",
+            ),
+            SourceEvidenceItem(
+                kind="page",
+                url="https://agency.gov/procurement/search?query=data+annotation",
+                summary="Search interface for tenders and contract opportunities.",
+            ),
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(
+        decision=decision,
+        candidate_domain="agency.gov",
+        candidate_canonical_url="https://agency.gov/procurement/bids/open",
+    )
+
+    assert decision.useful is True
+    assert decision.outcome == "data_on_site"
+    assert decision.relevance_score >= 0.8
+    assert "quality_gate:low_confidence_promoted_from_evidence" in decision.notes
 
 
 def test_quality_gate_demotes_off_domain_only_evidence() -> None:

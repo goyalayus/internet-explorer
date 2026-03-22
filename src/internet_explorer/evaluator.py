@@ -1587,11 +1587,19 @@ def _apply_quality_gates(
         decision.notes.append("quality_gate:decision_fallback_score_clamped")
 
     if decision.useful and decision.outcome in {"data_on_site", "api_available"} and decision.relevance_score < 0.75:
-        decision.useful = False
-        decision.outcome = "irrelevant"
-        decision.relevance_score = min(decision.relevance_score, 0.35)
-        decision.notes.append("quality_gate:low_confidence_useful_demoted")
-        return
+        if _should_promote_low_confidence_useful(
+            decision=decision,
+            path_quality=path_quality,
+            candidate_domain=candidate_domain,
+        ):
+            decision.relevance_score = max(decision.relevance_score, 0.8)
+            decision.notes.append("quality_gate:low_confidence_promoted_from_evidence")
+        else:
+            decision.useful = False
+            decision.outcome = "irrelevant"
+            decision.relevance_score = min(decision.relevance_score, 0.35)
+            decision.notes.append("quality_gate:low_confidence_useful_demoted")
+            return
 
     if decision.useful and decision.outcome in {"data_on_site", "api_available"}:
         if path_quality == "weak":
@@ -1711,6 +1719,39 @@ def _has_marketplace_noise_hint(*, reasoning: str, source_evidence: list[SourceE
         return False
     has_government_context = any(marker in text for marker in GOVERNMENT_PROCUREMENT_CONTEXT_MARKERS)
     return not has_government_context
+
+
+def _should_promote_low_confidence_useful(
+    *,
+    decision: EvaluationDecision,
+    path_quality: str,
+    candidate_domain: str,
+) -> bool:
+    if path_quality != "good":
+        return False
+    if not _has_in_domain_evidence(source_evidence=decision.source_evidence, candidate_domain=candidate_domain):
+        return False
+    if not _has_non_indirect_procurement_surface_url(decision.source_evidence):
+        return False
+    if not _has_procurement_signal_in_source_evidence(decision.source_evidence):
+        return False
+    if any(item.kind in {"paywall", "contact_sales"} for item in decision.source_evidence):
+        return False
+    return True
+
+
+def _has_procurement_signal_in_source_evidence(source_evidence: list[SourceEvidenceItem]) -> bool:
+    for item in source_evidence:
+        text = " ".join(
+            [
+                str(item.url or ""),
+                str(item.title or ""),
+                str(item.summary or ""),
+            ]
+        ).lower()
+        if any(marker in text for marker in PROCUREMENT_SIGNAL_MARKERS):
+            return True
+    return False
 
 
 def _is_indirect_content_url(url: str) -> bool:
