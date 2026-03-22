@@ -284,7 +284,9 @@ def test_browser_delegate_prompt_includes_search_flow_discipline(tmp_path: Path)
 
     assert "loaded search or listing page with visible controls is not a blank-page failure state" in task
     assert "Before leaving a loaded search/listing workflow page or calling `done`" in task
-    assert "Do not jump to Google or DuckDuckGo" in task
+    assert "Do not navigate to external search engines" in task
+    assert "stay on the same registrable domain as the start URL" in task
+    assert "If navigation accidentally leaves the start domain, immediately go back" in task
     assert "Set Your Search Criteria" in task
     assert "CAPTCHAs are not automatically solved" in task
     assert "Do not claim that CAPTCHA was solved automatically" in task

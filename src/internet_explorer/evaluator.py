@@ -578,7 +578,10 @@ class UrlEvaluator:
                     "Skip it for novelty-focused discovery unless a human explicitly wants redundancy."
                 )
 
-            _apply_quality_gates(decision=decision)
+            _apply_quality_gates(
+                decision=decision,
+                candidate_domain=candidate.domain,
+            )
 
             evaluation = UrlEvaluation(
                 url_id=candidate.url_id,
@@ -1402,7 +1405,11 @@ def _reconcile_unknown_useful_outcome(
     return "unknown", False
 
 
-def _apply_quality_gates(*, decision: EvaluationDecision) -> None:
+def _apply_quality_gates(
+    *,
+    decision: EvaluationDecision,
+    candidate_domain: str = "",
+) -> None:
     path_quality = _classify_scraping_path_quality(decision.reasoning)
     decision.notes.append(f"path_quality:{path_quality}")
     has_meta_hint = _has_meta_resource_hint(decision.reasoning)
@@ -1419,6 +1426,20 @@ def _apply_quality_gates(*, decision: EvaluationDecision) -> None:
         decision.outcome = "irrelevant"
         decision.relevance_score = min(decision.relevance_score, 0.35)
         decision.notes.append("quality_gate:document_only_evidence_demoted")
+        return
+
+    if (
+        decision.useful
+        and decision.outcome in {"data_on_site", "api_available"}
+        and not _has_in_domain_evidence(
+            source_evidence=decision.source_evidence,
+            candidate_domain=candidate_domain,
+        )
+    ):
+        decision.useful = False
+        decision.outcome = "irrelevant"
+        decision.relevance_score = min(decision.relevance_score, 0.35)
+        decision.notes.append("quality_gate:off_domain_evidence_demoted")
         return
 
     if decision.useful and any(note.startswith("decision_fallback:") for note in decision.notes):
@@ -1481,6 +1502,28 @@ def _is_document_only_evidence(source_evidence: list[SourceEvidenceItem]) -> boo
     if not kinds:
         return False
     return kinds.issubset(allowed)
+
+
+def _has_in_domain_evidence(*, source_evidence: list[SourceEvidenceItem], candidate_domain: str) -> bool:
+    if not candidate_domain:
+        return True
+    normalized_domain = registrable_domain(candidate_domain)
+    if not normalized_domain:
+        return True
+
+    has_url_evidence = False
+    for item in source_evidence:
+        if not item.url:
+            continue
+        has_url_evidence = True
+        if registrable_domain(item.url) == normalized_domain:
+            return True
+
+    # Allow browser findings without URLs to pass this gate only when no URL evidence exists.
+    if not has_url_evidence:
+        return any(item.kind == "browser_finding" and bool(item.summary.strip()) for item in source_evidence)
+
+    return False
 
 
 def _infer_outcome_from_source_evidence(*, api_stage: str, source_evidence: list[SourceEvidenceItem]) -> str:

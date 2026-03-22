@@ -621,3 +621,35 @@ def test_quality_gate_demotes_low_confidence_useful() -> None:
     assert decision.useful is False
     assert decision.outcome == "irrelevant"
     assert "quality_gate:low_confidence_useful_demoted" in decision.notes
+
+
+def test_quality_gate_demotes_off_domain_only_evidence() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.9,
+        outcome="data_on_site",
+        reasoning=(
+            "Why useful: this domain can lead to procurement results. "
+            "Recurring path: use listings and filters."
+        ),
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="page",
+                url="https://other-portal.example.org/rfps",
+                summary="External procurement listing",
+            ),
+            SourceEvidenceItem(
+                kind="pdf",
+                url="https://external.example.org/tender.pdf",
+                summary="Tender document",
+            ),
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(decision=decision, candidate_domain="example.com")
+
+    assert decision.useful is False
+    assert decision.outcome == "irrelevant"
+    assert "quality_gate:off_domain_evidence_demoted" in decision.notes
