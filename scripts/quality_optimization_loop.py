@@ -73,6 +73,41 @@ def _append_line(path: Path, line: str) -> None:
         handle.write(line.rstrip() + "\n")
 
 
+def _is_mongo_connectivity_error(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    markers = (
+        "serverselectiontimeouterror",
+        "networktimeout",
+        "no servers found yet",
+        "topology description",
+        "timed out",
+        "sockettimeoutms",
+        "connecttimeoutms",
+        "docdb",
+        "mongodb",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _attempt_runtime_recovery(*, status_log_path: Path, reason: str) -> bool:
+    _append_line(status_log_path, f"[{_utc_now()}] runtime recovery requested: {reason}")
+    bootstrap = run_runtime_bootstrap(
+        Path.cwd(),
+        write_env=False,
+        start_vpn=True,
+        verify_mongo=True,
+    )
+    _append_line(
+        status_log_path,
+        (
+            f"[{_utc_now()}] runtime recovery ready={bootstrap.ready} "
+            f"vpn={bootstrap.vpn_status_after.get('message') if bootstrap.vpn_status_after else 'none'} "
+            f"mongo={bootstrap.mongo_message}"
+        ),
+    )
+    return bool(bootstrap.ready)
+
+
 def _is_strong(doc: dict[str, Any]) -> bool:
     if not bool(doc.get("useful")):
         return False
@@ -252,7 +287,7 @@ def main() -> None:
 
     for iteration in range(1, max(1, args.max_runs) + 1):
         config = AppConfig.from_env(Path.cwd(), prefer_process_env=True)
-        iteration_started = datetime.utcnow()
+        iteration_started = datetime.now(timezone.utc)
         run_id = ""
         run_exception = ""
         try:
@@ -260,7 +295,24 @@ def main() -> None:
         except BaseException as exc:  # noqa: BLE001
             run_exception = f"{type(exc).__name__}: {exc}"
             _append_line(status_log_path, f"[{_utc_now()}] iteration={iteration} run raised {run_exception}")
-            run_id = _latest_run_id_since(config, iteration_started)
+            if _is_mongo_connectivity_error(exc) and not args.skip_runtime_up:
+                _attempt_runtime_recovery(
+                    status_log_path=status_log_path,
+                    reason=f"run_exception:{run_exception}",
+                )
+            try:
+                run_id = _latest_run_id_since(config, iteration_started)
+            except BaseException as latest_exc:  # noqa: BLE001
+                _append_line(
+                    status_log_path,
+                    f"[{_utc_now()}] iteration={iteration} latest_run_id lookup failed: {type(latest_exc).__name__}: {latest_exc}",
+                )
+                if _is_mongo_connectivity_error(latest_exc) and not args.skip_runtime_up:
+                    _attempt_runtime_recovery(
+                        status_log_path=status_log_path,
+                        reason=f"latest_run_id_lookup:{type(latest_exc).__name__}: {latest_exc}",
+                    )
+                run_id = ""
             if not run_id:
                 plateau_count += 1
                 _append_line(
@@ -275,14 +327,51 @@ def main() -> None:
                     break
                 continue
 
-        metrics = _collect_metrics(config, run_id)
-        run_state = _run_status(config, run_id)
+        metrics: QualityMetrics | None = None
+        run_state: dict[str, Any] = {}
+        metric_error = ""
+        for attempt in (1, 2):
+            try:
+                metrics = _collect_metrics(config, run_id)
+                run_state = _run_status(config, run_id)
+                metric_error = ""
+                break
+            except BaseException as metrics_exc:  # noqa: BLE001
+                metric_error = f"{type(metrics_exc).__name__}: {metrics_exc}"
+                _append_line(
+                    status_log_path,
+                    (
+                        f"[{_utc_now()}] iteration={iteration} metrics/status read failed "
+                        f"(attempt={attempt}/2): {metric_error}"
+                    ),
+                )
+                if attempt == 1 and _is_mongo_connectivity_error(metrics_exc) and not args.skip_runtime_up:
+                    _attempt_runtime_recovery(
+                        status_log_path=status_log_path,
+                        reason=f"metrics_read:{metric_error}",
+                    )
+                    continue
+                break
+
+        if metrics is None:
+            plateau_count += 1
+            _append_line(
+                status_log_path,
+                (
+                    f"[{_utc_now()}] iteration={iteration} metrics unavailable after retries; "
+                    f"plateau_count={plateau_count}/{args.plateau_patience}"
+                ),
+            )
+            if plateau_count >= max(1, args.plateau_patience):
+                _append_line(status_log_path, f"[{_utc_now()}] plateau reached after metrics failures, stopping loop")
+                break
+            continue
 
         row = {
             "iteration": iteration,
             "run_id": metrics.run_id,
             "run_status": run_state.get("status"),
-            "run_error": run_state.get("error") or run_exception,
+            "run_error": run_state.get("error") or run_exception or metric_error,
             "evaluated_count": metrics.evaluated_count,
             "useful_count": metrics.useful_count,
             "strong_count": metrics.strong_count,
