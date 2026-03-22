@@ -477,7 +477,8 @@ def test_should_delegate_browser_only_when_hybrid_page_is_thin(tmp_path: Path) -
     )
 
     assert evaluator._should_delegate_browser(page_evidence=[rich_page], render_profile="hybrid", step_no=2) is False
-    assert evaluator._should_delegate_browser(page_evidence=[thin_page], render_profile="hybrid", step_no=2) is True
+    assert evaluator._should_delegate_browser(page_evidence=[thin_page], render_profile="hybrid", step_no=2) is False
+    assert evaluator._should_delegate_browser(page_evidence=[thin_page], render_profile="hybrid", step_no=3) is True
 
 
 def test_should_delegate_browser_when_blocked_or_auth_gated(tmp_path: Path) -> None:
