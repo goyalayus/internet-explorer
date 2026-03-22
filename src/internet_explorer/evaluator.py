@@ -131,10 +131,13 @@ GENERIC_TOOL_IDENTITY_TERMS = {
     "contact",
     "pricing",
 }
-SCRAPING_PATH_ACTION_MARKERS = (
+SCRAPING_PATH_QUERY_ACTION_MARKERS = (
     "search",
     "filter",
     "query",
+    "keyword",
+)
+SCRAPING_PATH_NAV_ACTION_MARKERS = (
     "navigate",
     "go to",
     "use the",
@@ -179,6 +182,9 @@ META_RESOURCE_MARKERS = (
     "list of sources",
     "academic paper",
     "social media post",
+    "final report",
+    "white paper",
+    "readiness report",
 )
 
 
@@ -1363,6 +1369,13 @@ def _apply_quality_gates(*, decision: EvaluationDecision) -> None:
         decision.notes.append("quality_gate:missing_source_evidence_demoted")
         return
 
+    if decision.useful and decision.outcome in {"data_on_site", "api_available"} and _is_document_only_evidence(decision.source_evidence):
+        decision.useful = False
+        decision.outcome = "irrelevant"
+        decision.relevance_score = min(decision.relevance_score, 0.35)
+        decision.notes.append("quality_gate:document_only_evidence_demoted")
+        return
+
     if decision.useful and any(note.startswith("decision_fallback:") for note in decision.notes):
         decision.relevance_score = min(decision.relevance_score, 0.45)
         decision.notes.append("quality_gate:decision_fallback_score_clamped")
@@ -1388,12 +1401,15 @@ def _classify_scraping_path_quality(reasoning: str) -> str:
     if not text:
         return "weak"
 
-    has_action = any(marker in text for marker in SCRAPING_PATH_ACTION_MARKERS)
+    has_query_action = any(marker in text for marker in SCRAPING_PATH_QUERY_ACTION_MARKERS)
+    has_nav_action = any(marker in text for marker in SCRAPING_PATH_NAV_ACTION_MARKERS)
+    has_action = has_query_action or has_nav_action
     has_surface = any(marker in text for marker in SCRAPING_PATH_SURFACE_MARKERS)
     has_concrete = any(marker in text for marker in SCRAPING_PATH_CONCRETE_MARKERS)
     has_meta_hint = _has_meta_resource_hint(text)
+    has_api_request_path = "api" in text and any(marker in text for marker in ("endpoint", "curl", "request", "query parameter"))
 
-    if has_action and has_surface and has_concrete and not has_meta_hint:
+    if (has_query_action or has_api_request_path) and has_surface and has_concrete and not has_meta_hint:
         return "good"
     if has_action and has_surface and not has_meta_hint:
         return "partial"
@@ -1403,6 +1419,16 @@ def _classify_scraping_path_quality(reasoning: str) -> str:
 def _has_meta_resource_hint(reasoning: str) -> bool:
     text = (reasoning or "").lower()
     return any(marker in text for marker in META_RESOURCE_MARKERS)
+
+
+def _is_document_only_evidence(source_evidence: list[SourceEvidenceItem]) -> bool:
+    if not source_evidence:
+        return False
+    allowed = {"pdf", "file", "dataset"}
+    kinds = {item.kind for item in source_evidence if item.kind}
+    if not kinds:
+        return False
+    return kinds.issubset(allowed)
 
 
 def _infer_outcome_from_source_evidence(*, api_stage: str, source_evidence: list[SourceEvidenceItem]) -> str:

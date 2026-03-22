@@ -572,3 +572,27 @@ def test_quality_gate_demotes_weak_meta_path() -> None:
     assert decision.useful is False
     assert decision.outcome == "irrelevant"
     assert "quality_gate:weak_scraping_path_meta_demoted" in decision.notes
+
+
+def test_quality_gate_demotes_document_only_evidence() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.9,
+        outcome="data_on_site",
+        reasoning="Why useful: report discusses annotation work. Recurring path: monitor this source.",
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="pdf",
+                url="https://example.com/report.pdf",
+                summary="Procurement report",
+            )
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(decision=decision)
+
+    assert decision.useful is False
+    assert decision.outcome == "irrelevant"
+    assert "quality_gate:document_only_evidence_demoted" in decision.notes
