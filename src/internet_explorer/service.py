@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 
 from internet_explorer.browser_delegate import BrowserDelegationManager
@@ -20,6 +21,88 @@ from internet_explorer.strategy import StrategyPlanner
 from internet_explorer.telemetry import Telemetry
 from internet_explorer.tool_inventory import ToolInventory
 from internet_explorer.vpn import GenericVpnManager
+
+
+_PROCUREMENT_MARKERS = (
+    "rfp",
+    "tender",
+    "procurement",
+    "solicitation",
+    "contract opportunities",
+    "contract opportunity",
+    "vendor",
+    "supplier",
+    "bid",
+    "bids",
+    "eprocure",
+    "opportunities",
+)
+_LOW_SIGNAL_MARKERS = (
+    "faculty",
+    "profile",
+    "staff",
+    "team",
+    "directory",
+    "alumni",
+    "blog",
+    "newsroom",
+    "press release",
+    "publication",
+    "journal",
+    "case study",
+    "whitepaper",
+    "github repository",
+    "readthedocs",
+)
+_LOW_SIGNAL_URL_MARKERS = (
+    "/faculty",
+    "/profile",
+    "/profiles",
+    "/people/",
+    "/person/",
+    "/staff/",
+    "/team/",
+    "/news/",
+    "/blog/",
+    "/article/",
+    "/articles/",
+    "/press/",
+    "/wiki/",
+)
+_PROCUREMENT_URL_MARKERS = (
+    "/rfp",
+    "/tender",
+    "/tenders",
+    "/procurement",
+    "/solicitation",
+    "/solicitations",
+    "/contract",
+    "/contracts",
+    "/bids",
+    "/bid",
+    "/vendor",
+    "/supplier",
+)
+_NOISE_HOSTS = {
+    "facebook.com",
+    "linkedin.com",
+    "instagram.com",
+    "x.com",
+    "twitter.com",
+    "youtube.com",
+    "tiktok.com",
+    "medium.com",
+    "github.com",
+    "readthedocs.io",
+    "substack.com",
+    "pinterest.com",
+}
+
+
+@dataclass(slots=True)
+class _DomainResult:
+    canonical_url: str
+    result: SearchResult
 
 
 class IntentDiscoveryService:
@@ -366,31 +449,73 @@ class IntentDiscoveryService:
         return strategies, queries, raw_results
 
     def _dedupe_results(self, raw_results, baseline_domains: set[str], telemetry: Telemetry) -> list[UrlCandidate]:
-        deduped: dict[str, UrlCandidate] = {}
+        grouped: dict[str, list[_DomainResult]] = {}
+        domain_order: list[str] = []
+
         for result in raw_results:
             canonical_url = canonicalize_url(result.url)
             domain = registrable_domain(canonical_url)
-            if not domain or domain in deduped:
+            if not domain:
                 continue
+
+            if domain not in grouped:
+                grouped[domain] = []
+                domain_order.append(domain)
+            grouped[domain].append(_DomainResult(canonical_url=canonical_url, result=result))
+
+        deduped: dict[str, UrlCandidate] = {}
+        skipped_domains: list[dict[str, str]] = []
+        for domain in domain_order:
+            domain_results = grouped.get(domain) or []
+            if not domain_results:
+                continue
+
+            selected = max(
+                domain_results,
+                key=lambda item: (
+                    _score_search_result(item.result, item.canonical_url, domain=domain),
+                    -int(item.result.rank),
+                    -int(item.result.serp_page),
+                ),
+            )
+            selected_score = _score_search_result(selected.result, selected.canonical_url, domain=domain)
+            skip_reason = _skip_reason_for_domain_candidate(
+                domain=domain,
+                result=selected.result,
+                canonical_url=selected.canonical_url,
+                score=selected_score,
+            )
+            if skip_reason:
+                skipped_domains.append(
+                    {
+                        "domain": domain,
+                        "reason": skip_reason,
+                        "url": selected.canonical_url,
+                        "title": selected.result.title,
+                    }
+                )
+                continue
+
             homepage_url = homepage_url_for_domain(domain)
-            start_url = homepage_url if self.config.candidate_start_mode == "domain_homepage" else canonical_url
+            start_url = homepage_url if self.config.candidate_start_mode == "domain_homepage" else selected.canonical_url
             deduped[domain] = UrlCandidate(
                 url_id=f"url_{uuid.uuid4().hex[:10]}",
-                strategy_id=result.strategy_id,
-                query_id=result.query_id,
-                raw_url=result.url,
-                canonical_url=canonical_url,
+                strategy_id=selected.result.strategy_id,
+                query_id=selected.result.query_id,
+                raw_url=selected.result.url,
+                canonical_url=selected.canonical_url,
                 start_url=start_url,
                 homepage_url=homepage_url,
                 domain=domain,
                 novelty=domain not in baseline_domains,
                 start_mode=self.config.candidate_start_mode,  # type: ignore[arg-type]
-                source_title=result.title,
-                source_snippet=result.snippet,
-                serp_rank=result.rank,
-                serp_page=result.serp_page,
-                content_kind_hint=_guess_content_kind(canonical_url),
+                source_title=selected.result.title,
+                source_snippet=selected.result.snippet,
+                serp_rank=selected.result.rank,
+                serp_page=selected.result.serp_page,
+                content_kind_hint=_guess_content_kind(selected.canonical_url),
             )
+
         candidates = list(deduped.values())
         telemetry.emit(
             phase="dedup",
@@ -398,7 +523,12 @@ class IntentDiscoveryService:
             input_payload={"raw_results": len(raw_results)},
             output_summary=[candidate.model_dump() for candidate in candidates[:50]],
             decision=f"deduped_domains_to_{len(candidates)}",
-            extra={"deduped_total": len(candidates), "dedupe_key": "registrable_domain"},
+            extra={
+                "deduped_total": len(candidates),
+                "dedupe_key": "registrable_domain",
+                "skipped_domain_count": len(skipped_domains),
+                "skipped_domains_preview": skipped_domains[:40],
+            },
         )
         return candidates
 
@@ -471,3 +601,64 @@ def _guess_content_kind(url: str) -> str:
     if lowered.endswith(".pdf") or ".pdf?" in lowered:
         return "pdf"
     return "html_page"
+
+
+def _score_search_result(result: SearchResult, canonical_url: str, *, domain: str) -> float:
+    text = f"{result.title} {result.snippet} {canonical_url}".lower()
+    score = 0.0
+
+    procurement_hits = sum(1 for marker in _PROCUREMENT_MARKERS if marker in text)
+    score += min(procurement_hits, 5) * 1.1
+
+    procurement_url_hits = sum(1 for marker in _PROCUREMENT_URL_MARKERS if marker in canonical_url.lower())
+    score += min(procurement_url_hits, 4) * 1.0
+
+    low_signal_hits = sum(1 for marker in _LOW_SIGNAL_MARKERS if marker in text)
+    score -= min(low_signal_hits, 4) * 1.0
+
+    low_signal_url_hits = sum(1 for marker in _LOW_SIGNAL_URL_MARKERS if marker in canonical_url.lower())
+    score -= min(low_signal_url_hits, 3) * 1.2
+
+    rank = max(1, int(result.rank))
+    score += max(0.0, 1.2 - (rank - 1) * 0.08)
+
+    page = max(1, int(result.serp_page))
+    score += 0.2 if page == 1 else 0.0
+
+    lowered_domain = domain.lower()
+    if _is_government_or_public_sector_domain(lowered_domain):
+        score += 0.8
+
+    if canonical_url.lower().endswith(".pdf") or ".pdf?" in canonical_url.lower():
+        score -= 1.0
+
+    return score
+
+
+def _skip_reason_for_domain_candidate(*, domain: str, result: SearchResult, canonical_url: str, score: float) -> str:
+    lowered_domain = domain.lower()
+    if any(lowered_domain == host or lowered_domain.endswith(f".{host}") for host in _NOISE_HOSTS):
+        return "noise_host_filtered"
+
+    if score <= -1.5 and not _is_government_or_public_sector_domain(lowered_domain):
+        return "very_low_signal_candidate"
+
+    text = f"{result.title} {result.snippet} {canonical_url}".lower()
+    has_procurement_signal = any(marker in text for marker in _PROCUREMENT_MARKERS)
+    if not has_procurement_signal and any(marker in canonical_url.lower() for marker in _LOW_SIGNAL_URL_MARKERS):
+        return "low_signal_profile_page_only"
+
+    return ""
+
+
+def _is_government_or_public_sector_domain(domain: str) -> bool:
+    lowered = (domain or "").lower()
+    if not lowered:
+        return False
+    if lowered.endswith(".gov") or ".gov." in lowered:
+        return True
+    if lowered.endswith(".gob.mx") or lowered.endswith(".gov.in"):
+        return True
+    if lowered.endswith(".edu") or ".edu." in lowered:
+        return True
+    return False

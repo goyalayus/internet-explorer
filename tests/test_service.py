@@ -200,3 +200,117 @@ async def test_resolve_discovery_inputs_writes_cache_on_miss(tmp_path) -> None:
     assert (service.config.discovery_cache_dir / "shared-rfp-key.json").exists()
     assert any(event["decision"] == "cache_miss" for event in telemetry.events)
     assert any(event["decision"] == "cache_write" for event in telemetry.events)
+
+
+def test_dedupe_results_selects_best_candidate_for_domain() -> None:
+    service = object.__new__(IntentDiscoveryService)
+    service.config = SimpleNamespace(candidate_start_mode="domain_homepage")
+    telemetry = _TelemetryStub()
+
+    raw_results = [
+        SearchResult(
+            query_id="query_1",
+            strategy_id="strategy_1",
+            rank=1,
+            serp_page=1,
+            title="Faculty profile",
+            snippet="Department staff profile page",
+            url="https://example.edu/people/jane-doe",
+        ),
+        SearchResult(
+            query_id="query_2",
+            strategy_id="strategy_2",
+            rank=7,
+            serp_page=1,
+            title="Procurement opportunities",
+            snippet="Open tenders and RFP opportunities",
+            url="https://example.edu/procurement/opportunities",
+        ),
+    ]
+
+    candidates = IntentDiscoveryService._dedupe_results(
+        service,
+        raw_results=raw_results,
+        baseline_domains=set(),
+        telemetry=telemetry,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].domain == "example.edu"
+    assert candidates[0].canonical_url == "https://example.edu/procurement/opportunities"
+    assert candidates[0].start_url == "https://example.edu/"
+
+
+def test_dedupe_results_filters_known_noise_hosts() -> None:
+    service = object.__new__(IntentDiscoveryService)
+    service.config = SimpleNamespace(candidate_start_mode="domain_homepage")
+    telemetry = _TelemetryStub()
+
+    raw_results = [
+        SearchResult(
+            query_id="query_1",
+            strategy_id="strategy_1",
+            rank=1,
+            serp_page=1,
+            title="Company page",
+            snippet="Professional network profile",
+            url="https://www.linkedin.com/company/example-inc",
+        ),
+        SearchResult(
+            query_id="query_1",
+            strategy_id="strategy_1",
+            rank=2,
+            serp_page=1,
+            title="Contract opportunities",
+            snippet="State procurement RFP listing",
+            url="https://state.gov/procurement/contracts",
+        ),
+    ]
+
+    candidates = IntentDiscoveryService._dedupe_results(
+        service,
+        raw_results=raw_results,
+        baseline_domains=set(),
+        telemetry=telemetry,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].domain == "state.gov"
+
+
+def test_dedupe_results_first_result_mode_uses_selected_canonical_start() -> None:
+    service = object.__new__(IntentDiscoveryService)
+    service.config = SimpleNamespace(candidate_start_mode="first_result_url")
+    telemetry = _TelemetryStub()
+
+    raw_results = [
+        SearchResult(
+            query_id="query_1",
+            strategy_id="strategy_1",
+            rank=1,
+            serp_page=1,
+            title="Team",
+            snippet="Meet our team",
+            url="https://agency.example.com/team",
+        ),
+        SearchResult(
+            query_id="query_2",
+            strategy_id="strategy_2",
+            rank=8,
+            serp_page=1,
+            title="Vendor opportunities",
+            snippet="Open solicitations and bids",
+            url="https://agency.example.com/procurement/solicitations",
+        ),
+    ]
+
+    candidates = IntentDiscoveryService._dedupe_results(
+        service,
+        raw_results=raw_results,
+        baseline_domains=set(),
+        telemetry=telemetry,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].canonical_url == "https://agency.example.com/procurement/solicitations"
+    assert candidates[0].start_url == "https://agency.example.com/procurement/solicitations"
