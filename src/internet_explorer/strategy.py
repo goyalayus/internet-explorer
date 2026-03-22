@@ -65,6 +65,16 @@ QUERY_NOISE_SITE_EXCLUSIONS = (
     "-site:readthedocs.io",
     "-site:medium.com",
 )
+QUERY_NOISE_INURL_EXCLUSIONS = (
+    "-inurl:profile",
+    "-inurl:profiles",
+    "-inurl:people",
+    "-inurl:faculty",
+    "-inurl:blog",
+    "-inurl:news",
+    "-inurl:article",
+    "-inurl:articles",
+)
 
 FALLBACK_STRATEGY_TEMPLATES: list[tuple[str, str]] = [
     (
@@ -298,6 +308,12 @@ def _ensure_procurement_query_focus(query: str) -> str:
         lowered = text.lower()
 
     for exclusion in QUERY_NOISE_SITE_EXCLUSIONS:
+        if exclusion in lowered:
+            continue
+        text = f"{text} {exclusion}"
+        lowered = text.lower()
+
+    for exclusion in QUERY_NOISE_INURL_EXCLUSIONS:
         if exclusion in lowered:
             continue
         text = f"{text} {exclusion}"

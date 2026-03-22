@@ -18,6 +18,8 @@ def test_ensure_procurement_query_focus_adds_anchor_and_noise_exclusions() -> No
     assert "-site:linkedin.com" in hardened.lower()
     assert "-site:github.com" in hardened.lower()
     assert "-site:youtube.com" in hardened.lower()
+    assert "-inurl:profile" in hardened.lower()
+    assert "-inurl:faculty" in hardened.lower()
 
 
 def test_ensure_procurement_query_focus_does_not_duplicate_existing_anchor() -> None:
