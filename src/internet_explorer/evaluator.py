@@ -186,6 +186,42 @@ META_RESOURCE_MARKERS = (
     "white paper",
     "readiness report",
 )
+PROCUREMENT_SIGNAL_MARKERS = (
+    "rfp",
+    "tender",
+    "tenders",
+    "procurement",
+    "solicitation",
+    "solicitations",
+    "contract opportunities",
+    "contract opportunity",
+    "opportunity",
+    "opportunities",
+    "bid",
+    "bids",
+    "vendor",
+    "supplier",
+    "eprocurement",
+    "e-procurement",
+    "open procurement",
+)
+INDIRECT_CONTENT_URL_MARKERS = (
+    "/article",
+    "/articles/",
+    "/blog",
+    "/blogs/",
+    "/news/",
+    "/press",
+    "/insight",
+    "/insights/",
+    "/case-study",
+    "/case-studies/",
+    "/journal",
+    "/publication",
+    "/publications/",
+    "/whitepaper",
+    "/white-paper",
+)
 
 
 class UrlEvaluator:
@@ -1430,6 +1466,17 @@ def _apply_quality_gates(
 
     if (
         decision.useful
+        and decision.outcome == "data_on_site"
+        and _is_indirect_content_evidence_without_procurement_signals(decision.source_evidence)
+    ):
+        decision.useful = False
+        decision.outcome = "irrelevant"
+        decision.relevance_score = min(decision.relevance_score, 0.35)
+        decision.notes.append("quality_gate:indirect_content_evidence_demoted")
+        return
+
+    if (
+        decision.useful
         and decision.outcome in {"data_on_site", "api_available"}
         and not _has_in_domain_evidence(
             source_evidence=decision.source_evidence,
@@ -1524,6 +1571,34 @@ def _has_in_domain_evidence(*, source_evidence: list[SourceEvidenceItem], candid
         return any(item.kind == "browser_finding" and bool(item.summary.strip()) for item in source_evidence)
 
     return False
+
+
+def _is_indirect_content_evidence_without_procurement_signals(source_evidence: list[SourceEvidenceItem]) -> bool:
+    if not source_evidence:
+        return False
+
+    has_procurement_signal = False
+    has_indirect_signal = False
+    for item in source_evidence:
+        evidence_text = " ".join(
+            [
+                str(item.url or ""),
+                str(item.title or ""),
+                str(item.summary or ""),
+            ]
+        ).lower()
+        if any(marker in evidence_text for marker in PROCUREMENT_SIGNAL_MARKERS):
+            has_procurement_signal = True
+        if _is_indirect_content_url(item.url) or any(marker in evidence_text for marker in ("article", "blog", "paper", "journal")):
+            has_indirect_signal = True
+    return has_indirect_signal and not has_procurement_signal
+
+
+def _is_indirect_content_url(url: str) -> bool:
+    lowered = (url or "").lower()
+    if not lowered:
+        return False
+    return any(marker in lowered for marker in INDIRECT_CONTENT_URL_MARKERS)
 
 
 def _infer_outcome_from_source_evidence(*, api_stage: str, source_evidence: list[SourceEvidenceItem]) -> str:

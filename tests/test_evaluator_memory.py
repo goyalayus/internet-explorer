@@ -653,3 +653,57 @@ def test_quality_gate_demotes_off_domain_only_evidence() -> None:
     assert decision.useful is False
     assert decision.outcome == "irrelevant"
     assert "quality_gate:off_domain_evidence_demoted" in decision.notes
+
+
+def test_quality_gate_demotes_indirect_article_evidence_without_procurement_signals() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.9,
+        outcome="data_on_site",
+        reasoning=(
+            "Why useful: this research article references agency activity. "
+            "Recurring path: monitor this source."
+        ),
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="page",
+                url="https://pmc.ncbi.nlm.nih.gov/articles/PMC12306506/",
+                summary="Academic article about scientific workflows.",
+            )
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(decision=decision, candidate_domain="nih.gov")
+
+    assert decision.useful is False
+    assert decision.outcome == "irrelevant"
+    assert "quality_gate:indirect_content_evidence_demoted" in decision.notes
+
+
+def test_quality_gate_keeps_direct_procurement_pipeline_evidence() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.9,
+        outcome="data_on_site",
+        reasoning=(
+            "Why useful: official procurement source. "
+            "Recurring path: use procurement pipeline listing and tender search."
+        ),
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="page",
+                url="https://assets.publishing.service.gov.uk/media/pipeline/procurement-pipeline.xlsx",
+                summary="UK procurement pipeline includes data annotation opportunities.",
+            )
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(decision=decision, candidate_domain="service.gov.uk")
+
+    assert decision.useful is True
+    assert decision.outcome == "data_on_site"
+    assert "quality_gate:indirect_content_evidence_demoted" not in decision.notes
