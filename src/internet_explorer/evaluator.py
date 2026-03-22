@@ -205,6 +205,25 @@ PROCUREMENT_SIGNAL_MARKERS = (
     "e-procurement",
     "open procurement",
 )
+PROCUREMENT_SURFACE_URL_MARKERS = (
+    "/rfp",
+    "rfp",
+    "/tender",
+    "/tenders",
+    "/bid",
+    "/bids",
+    "/procurement",
+    "/solicitation",
+    "/solicitations",
+    "/opp/",
+    "opportunity",
+    "opportunities",
+    "/contracts",
+    "/contract-opportunities",
+    "/vendor",
+    "/suppliers",
+    "eprocure",
+)
 INDIRECT_CONTENT_URL_MARKERS = (
     "/article",
     "/articles/",
@@ -617,6 +636,7 @@ class UrlEvaluator:
             _apply_quality_gates(
                 decision=decision,
                 candidate_domain=candidate.domain,
+                candidate_canonical_url=candidate.canonical_url,
             )
 
             evaluation = UrlEvaluation(
@@ -1445,6 +1465,7 @@ def _apply_quality_gates(
     *,
     decision: EvaluationDecision,
     candidate_domain: str = "",
+    candidate_canonical_url: str = "",
 ) -> None:
     path_quality = _classify_scraping_path_quality(decision.reasoning)
     decision.notes.append(f"path_quality:{path_quality}")
@@ -1473,6 +1494,18 @@ def _apply_quality_gates(
         decision.outcome = "irrelevant"
         decision.relevance_score = min(decision.relevance_score, 0.35)
         decision.notes.append("quality_gate:indirect_content_evidence_demoted")
+        return
+
+    if (
+        decision.useful
+        and decision.outcome == "data_on_site"
+        and _is_indirect_content_url(candidate_canonical_url)
+        and not _has_non_indirect_procurement_surface_url(decision.source_evidence)
+    ):
+        decision.useful = False
+        decision.outcome = "irrelevant"
+        decision.relevance_score = min(decision.relevance_score, 0.35)
+        decision.notes.append("quality_gate:indirect_page_without_surface_demoted")
         return
 
     if (
@@ -1592,6 +1625,18 @@ def _is_indirect_content_evidence_without_procurement_signals(source_evidence: l
         if _is_indirect_content_url(item.url) or any(marker in evidence_text for marker in ("article", "blog", "paper", "journal")):
             has_indirect_signal = True
     return has_indirect_signal and not has_procurement_signal
+
+
+def _has_non_indirect_procurement_surface_url(source_evidence: list[SourceEvidenceItem]) -> bool:
+    for item in source_evidence:
+        url = (item.url or "").lower()
+        if not url:
+            continue
+        if _is_indirect_content_url(url):
+            continue
+        if any(marker in url for marker in PROCUREMENT_SURFACE_URL_MARKERS):
+            return True
+    return False
 
 
 def _is_indirect_content_url(url: str) -> bool:

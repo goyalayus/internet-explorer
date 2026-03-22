@@ -707,3 +707,70 @@ def test_quality_gate_keeps_direct_procurement_pipeline_evidence() -> None:
     assert decision.useful is True
     assert decision.outcome == "data_on_site"
     assert "quality_gate:indirect_content_evidence_demoted" not in decision.notes
+
+
+def test_quality_gate_demotes_indirect_candidate_page_without_surface_url() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.9,
+        outcome="data_on_site",
+        reasoning=(
+            "Why useful: this announcement mentions a solicitation. "
+            "Recurring path: monitor this page."
+        ),
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="page",
+                url="https://agency.gov/news/2026/03/solicitation-announcement",
+                summary="Agency news update about solicitation plans.",
+            )
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(
+        decision=decision,
+        candidate_domain="agency.gov",
+        candidate_canonical_url="https://agency.gov/news/2026/03/solicitation-announcement",
+    )
+
+    assert decision.useful is False
+    assert decision.outcome == "irrelevant"
+    assert "quality_gate:indirect_page_without_surface_demoted" in decision.notes
+
+
+def test_quality_gate_keeps_indirect_candidate_when_surface_url_evidence_exists() -> None:
+    decision = EvaluationDecision(
+        useful=True,
+        relevance_score=0.9,
+        outcome="data_on_site",
+        reasoning=(
+            "Why useful: official source with clear recurring path. "
+            "Recurring path: navigate to procurement bids list."
+        ),
+        api_stage="none",
+        source_evidence=[
+            SourceEvidenceItem(
+                kind="page",
+                url="https://agency.gov/news/2026/03/solicitation-announcement",
+                summary="Announcement that links to procurement area.",
+            ),
+            SourceEvidenceItem(
+                kind="page",
+                url="https://agency.gov/procurement/bids/open",
+                summary="Open bids listing page.",
+            ),
+        ],
+        notes=[],
+    )
+
+    _apply_quality_gates(
+        decision=decision,
+        candidate_domain="agency.gov",
+        candidate_canonical_url="https://agency.gov/news/2026/03/solicitation-announcement",
+    )
+
+    assert decision.useful is True
+    assert decision.outcome == "data_on_site"
+    assert "quality_gate:indirect_page_without_surface_demoted" not in decision.notes
